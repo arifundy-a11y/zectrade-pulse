@@ -1,0 +1,6 @@
+{
+  "name": "Zectrade Pulse",
+  "description": "Multi-asset trading platform and real-time fitness & biometric training tracker engineered for mobile and desktop viewports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
