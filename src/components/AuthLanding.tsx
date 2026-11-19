@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, Eye, EyeOff, ArrowUpRight, ArrowDownLeft, Trophy, ShieldCheck, Layers } from 'lucide-react';
+import { ChevronDown, Eye, EyeOff, ArrowUpRight, ArrowDownLeft, Trophy, ShieldCheck, Layers, Info, AlertTriangle } from 'lucide-react';
 import type { FaqEntry, LiveFeedItem, MarketQuote, PlatformStats } from '../types';
 
 interface AuthLandingProps {
@@ -35,7 +35,10 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [referralCode, setReferralCode] = useState('');
+  const [referralCode, setReferralCode] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return new URLSearchParams(window.location.search).get('ref')?.trim() ?? '';
+  });
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [openFaqIdx, setOpenFaqIdx] = useState<number | null>(0);
@@ -163,7 +166,7 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
                 <span>Lottery Live</span>
               </div>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                60-second Red/Green prediction rounds with transparent platform fees and instant 2x payouts.
+                Live Color, 0–9, and 2D/3D/6D prediction rounds with real-time draws and instant payouts.
               </p>
             </div>
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4 space-y-1">
@@ -419,6 +422,52 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
               );
             })}
           </div>
+        </div>
+      </section>
+
+      {/* About Platform Purpose & Trading Risk Warning */}
+      <section
+        id="about-platform"
+        data-testid="landing-purpose-risk"
+        aria-label="About Zectrade Pulse and Trading Risk Warning"
+        className="grid grid-cols-1 lg:grid-cols-2 gap-4 scroll-mt-20"
+      >
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-2">
+          <div className="flex items-center gap-2 text-blue-400">
+            <Info className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <h2 className="text-xs sm:text-sm font-bold text-white">
+              About Zectrade Pulse · Platform Purpose
+            </h2>
+          </div>
+          <p className="text-[11px] sm:text-xs text-slate-300 leading-relaxed">
+            Zectrade Pulse is designed as an all-in-one digital market and live prediction platform.
+            Traders can study real-time price charts, execute Spot (1x) or Futures Leverage
+            (5x–100x) orders across major cryptocurrencies, Gold (XAU), and Crude Oil, rehearse
+            with a resettable $100,000 Demo balance, follow market news, join Lottery Live
+            (Color, 0–9, and 2D/3D/6D) prediction rounds, and settle Real Account balances via
+            PIN-secured deposits, withdrawals, coin swaps, and P2P transfers.
+          </p>
+        </div>
+
+        <div className="bg-slate-900 border border-amber-500/30 rounded-2xl p-4 sm:p-5 space-y-2">
+          <div className="flex items-center gap-2 text-amber-400">
+            <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <h2 className="text-xs sm:text-sm font-bold text-amber-300">
+              Trading &amp; Prediction Risk Warning · No Profit Guarantee
+            </h2>
+          </div>
+          <p className="text-[11px] sm:text-xs text-slate-300 leading-relaxed">
+            Trading digital assets, leveraged futures, and participating in Lottery Live rounds
+            carries substantial risk of capital loss and is not suitable for every investor.
+            Market volatility and leverage can cause rapid losses exceeding expectations, and demo
+            results do not predict live outcomes.{' '}
+            <strong className="text-amber-200">
+              Zectrade Pulse does not guarantee profits, investment returns, or protection against
+              trading losses.
+            </strong>{' '}
+            All orders and predictions are made solely at your own risk—never commit funds you
+            cannot afford to lose.
+          </p>
         </div>
       </section>
     </main>

@@ -4,11 +4,15 @@ import type { WalletTransaction } from '../types';
 import {
   extractDepositMethodLabel,
   filterDepositTransactions,
+  filterDpWdTransactions,
   formatDepositStatusLabel,
   isDepositTransaction,
+  isWithdrawalTransaction,
   mergeWalletTransactionsWithServerActivity,
   normalizeDepositStatus,
   summarizeDepositTransactions,
+  summarizeDpWdTransactions,
+  summarizeReferralTransactions,
 } from './depositHistory';
 
 const sampleTransactions: WalletTransaction[] = [
@@ -122,6 +126,29 @@ test('filterDepositTransactions filters by status and search query in newest-fir
   const searchWave = filterDepositTransactions(sampleTransactions, 'all', 'wavepay');
   assert.equal(searchWave.length, 1);
   assert.equal(searchWave[0].id, 'loc-99');
+});
+
+test('summarizeDpWdTransactions and filterDpWdTransactions combine deposits and withdrawals cleanly', () => {
+  assert.equal(isWithdrawalTransaction({ type: 'WITHDRAWAL (KPAY)' }), true);
+  assert.equal(isWithdrawalTransaction({ type: 'P2P TRANSFER SENT' }), false);
+
+  const dpWdSummary = summarizeDpWdTransactions(sampleTransactions);
+  assert.equal(dpWdSummary.totalCount, 5);
+  assert.equal(dpWdSummary.depositCount, 4);
+  assert.equal(dpWdSummary.withdrawalCount, 1);
+  assert.equal(dpWdSummary.totalCompletedDepositsUsd, 1100);
+  assert.equal(dpWdSummary.totalCompletedWithdrawalsUsd, 120);
+  assert.equal(dpWdSummary.totalPendingUsd, 250);
+
+  const onlyWithdrawals = filterDpWdTransactions(sampleTransactions, 'withdrawal', 'all');
+  assert.deepEqual(onlyWithdrawals.map((t) => t.id), ['wd-1']);
+
+  const completedAll = filterDpWdTransactions(sampleTransactions, 'all', 'completed');
+  assert.deepEqual(completedAll.map((t) => t.id), ['wd-1', 'sql-100', 'loc-99']);
+
+  const refSummary = summarizeReferralTransactions(sampleTransactions);
+  assert.equal(refSummary.count, 1);
+  assert.equal(refSummary.totalEarnedUsd, 20);
 });
 
 test('mergeWalletTransactionsWithServerActivity surfaces Cloud SQL deposit statuses and deduplicates matching local/Firestore entries', () => {

@@ -964,4 +964,39 @@ export function sanitizeMemberNoticeText(raw: string | null | undefined): string
     .trim();
 }
 
+export const DEFAULT_BRAND_LOGO_URL = '/favicon.svg';
+const MAX_BRAND_LOGO_DATA_BYTES = 450 * 1024;
+
+export function normalizeBrandLogoUrl(
+  raw: unknown
+): { ok: true; url: string | null } | { ok: false; error: string } {
+  if (raw === null || raw === undefined) {
+    return { ok: true, url: null };
+  }
+  if (typeof raw !== 'string') {
+    return { ok: false, error: 'Logo URL must be a string.' };
+  }
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === DEFAULT_BRAND_LOGO_URL) {
+    return { ok: true, url: null };
+  }
+  if (trimmed.length > MAX_BRAND_LOGO_DATA_BYTES) {
+    return { ok: false, error: 'Logo image is too large. Keep uploaded icons under 300 KB.' };
+  }
+  const isLocalAsset = /^\/(?:assets\/|favicon\.svg)[a-zA-Z0-9._/-]*$/i.test(trimmed);
+  const isHttp = /^https?:\/\/.{3,2048}$/i.test(trimmed);
+  const isDataImage =
+    /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml|x-icon|vnd\.microsoft\.icon);base64,[a-zA-Z0-9+/=]+$/i.test(
+      trimmed
+    );
+  if (!isLocalAsset && !isHttp && !isDataImage) {
+    return {
+      ok: false,
+      error: 'Enter an https:// image URL, /favicon.svg, or upload a PNG/SVG/JPG/WebP/ICO file.',
+    };
+  }
+  return { ok: true, url: trimmed };
+}
+
+
 

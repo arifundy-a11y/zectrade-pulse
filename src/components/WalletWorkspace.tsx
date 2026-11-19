@@ -1,14 +1,20 @@
 import React, { useMemo, useState } from 'react';
 import {
+  ArrowDownLeft,
   ArrowDownToLine,
   ArrowLeftRight,
   ArrowUpRight,
   Camera,
+  Check,
   CheckCircle2,
+  ChevronUp,
   Clock,
   Copy,
+  Gift,
   IdCard,
   KeyRound,
+  LayoutList,
+  Link2,
   LogOut,
   PlusCircle,
   RefreshCw,
@@ -29,14 +35,17 @@ import { formatChartPrice } from '../utils/chartEngine';
 import { getAvatarInitials } from '../utils/avatarHelper';
 import {
   extractDepositMethodLabel,
-  filterDepositTransactions,
+  filterDpWdTransactions,
   formatDepositStatusLabel,
+  isDepositTransaction,
   normalizeDepositStatus,
-  summarizeDepositTransactions,
+  summarizeDpWdTransactions,
+  summarizeReferralTransactions,
   type DepositFilterStatus,
+  type DpWdKindFilter,
 } from '../utils/depositHistory';
 
-type WalletTab = 'overview' | 'deposit_history';
+type WalletTab = 'overview' | 'dp_wd_history' | 'invitation';
 
 interface WalletWorkspaceProps {
   user: UserProfile;
@@ -49,6 +58,7 @@ interface WalletWorkspaceProps {
   onResetDemo: () => void;
   onCopyUid: () => void;
   onCopyReferral: () => void;
+  onCopyInviteLink?: () => void;
   onOpenProfileEditModal: () => void;
   onOpenPinModal: () => void;
   onOpenSwapModal: (symbol?: MarketSymbol, dir?: 'usdtToCoin' | 'coinToUsdt') => void;
@@ -71,6 +81,7 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
   onResetDemo,
   onCopyUid,
   onCopyReferral,
+  onCopyInviteLink,
   onOpenProfileEditModal,
   onOpenPinModal,
   onOpenSwapModal,
@@ -82,8 +93,14 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
   onLogout,
 }) => {
   const [activeTab, setActiveTab] = useState<WalletTab>('overview');
-  const [depositFilter, setDepositFilter] = useState<DepositFilterStatus>('all');
-  const [depositSearch, setDepositSearch] = useState('');
+  const [kindFilter, setKindFilter] = useState<DpWdKindFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<DepositFilterStatus>('all');
+  const [dpWdSearch, setDpWdSearch] = useState('');
+  const [showAllDpWd, setShowAllDpWd] = useState(false);
+  const [copiedCodeFeedback, setCopiedCodeFeedback] = useState(false);
+  const [copiedLinkFeedback, setCopiedLinkFeedback] = useState(false);
+
+  const DP_WD_PREVIEW_LIMIT = 5;
 
   const isStaff =
     user.role === 'admin' ||
@@ -97,33 +114,58 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
   >;
   const initials = getAvatarInitials(user.fullName || user.username, user.email);
 
-  const depositSummary = useMemo(
-    () => summarizeDepositTransactions(transactions),
+  const dpWdSummary = useMemo(
+    () => summarizeDpWdTransactions(transactions),
     [transactions]
   );
 
-  const filteredDeposits = useMemo(
-    () => filterDepositTransactions(transactions, depositFilter, depositSearch),
-    [transactions, depositFilter, depositSearch]
+  const filteredDpWd = useMemo(
+    () => filterDpWdTransactions(transactions, kindFilter, statusFilter, dpWdSearch),
+    [transactions, kindFilter, statusFilter, dpWdSearch]
   );
+
+  const visibleDpWd = useMemo(
+    () => (showAllDpWd ? filteredDpWd : filteredDpWd.slice(0, DP_WD_PREVIEW_LIMIT)),
+    [filteredDpWd, showAllDpWd]
+  );
+  const hasMoreDpWd = filteredDpWd.length > DP_WD_PREVIEW_LIMIT;
+
+  const referralSummary = useMemo(
+    () => summarizeReferralTransactions(transactions),
+    [transactions]
+  );
+
+  const inviteLink =
+    typeof window !== 'undefined'
+      ? `${window.location.origin}/?ref=${encodeURIComponent(user.uid)}`
+      : `/?ref=${encodeURIComponent(user.uid)}`;
+
+  const handleCopyInviteCode = () => {
+    onCopyReferral();
+    setCopiedCodeFeedback(true);
+    window.setTimeout(() => setCopiedCodeFeedback(false), 1800);
+  };
+
+  const handleCopyInviteLink = () => {
+    if (onCopyInviteLink) {
+      onCopyInviteLink();
+    } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      void navigator.clipboard.writeText(inviteLink);
+    }
+    setCopiedLinkFeedback(true);
+    window.setTimeout(() => setCopiedLinkFeedback(false), 1800);
+  };
 
   return (
     <div className="space-y-4">
       {/* Account Mode Banner */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <p className="text-xs sm:text-sm font-bold text-white">
-            Active Mode:{' '}
-            <span className={accountMode === 'demo' ? 'text-amber-400' : 'text-blue-400'}>
-              {accountMode.toUpperCase()} ACCOUNT
-            </span>
-          </p>
-          <p className="text-[11px] text-slate-400">
-            {accountMode === 'demo'
-              ? 'Practice strategies with resettable virtual funds.'
-              : 'Live settlement mode with spot holdings, deposits, and withdrawals.'}
-          </p>
-        </div>
+        <p className="text-xs sm:text-sm font-bold text-white">
+          Active Mode:{' '}
+          <span className={accountMode === 'demo' ? 'text-amber-400' : 'text-blue-400'}>
+            {accountMode.toUpperCase()} ACCOUNT
+          </span>
+        </p>
         <div className="grid grid-cols-2 sm:flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs font-semibold">
           <button
             type="button"
@@ -146,11 +188,11 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* Wallet Workspace Navigation Tabs */}
+      {/* 3-Tab Wallet Workspace Navigation Bar */}
       <div
         role="tablist"
         aria-label="Wallet workspace sections"
-        className="inline-flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl"
+        className="grid grid-cols-3 sm:inline-flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-xl w-full sm:w-auto"
       >
         <button
           type="button"
@@ -158,46 +200,65 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
           aria-selected={activeTab === 'overview'}
           data-testid="wallet-tab-overview"
           onClick={() => setActiveTab('overview')}
-          className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+          className={`px-2 sm:px-3.5 py-2 rounded-lg text-[11px] sm:text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 ${
             activeTab === 'overview'
               ? 'bg-blue-600 text-white font-bold shadow-sm'
               : 'text-slate-400 hover:text-white hover:bg-slate-800/70'
           }`}
         >
-          Wallet Overview
+          <span className="sm:hidden">Overview</span>
+          <span className="hidden sm:inline">Wallet Overview</span>
         </button>
+
         <button
           type="button"
           role="tab"
-          aria-selected={activeTab === 'deposit_history'}
-          data-testid="wallet-tab-deposit-history"
-          onClick={() => setActiveTab('deposit_history')}
-          className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
-            activeTab === 'deposit_history'
+          aria-selected={activeTab === 'dp_wd_history'}
+          data-testid="wallet-tab-dp-wd-history"
+          onClick={() => setActiveTab('dp_wd_history')}
+          className={`px-2 sm:px-3.5 py-2 rounded-lg text-[11px] sm:text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 ${
+            activeTab === 'dp_wd_history'
               ? 'bg-emerald-600 text-white font-bold shadow-sm'
               : 'text-slate-400 hover:text-white hover:bg-slate-800/70'
           }`}
         >
-          <ArrowDownToLine className="w-3.5 h-3.5" aria-hidden="true" />
-          <span>Deposit History</span>
-          {depositSummary.totalCount > 0 && (
+          <ArrowDownToLine className="hidden sm:inline-block w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          <span>DP &amp; WD History</span>
+          {dpWdSummary.totalCount > 0 && (
             <span
-              className={`font-mono text-[11px] tabular-nums ${
-                activeTab === 'deposit_history' ? 'text-emerald-100' : 'text-slate-400'
+              className={`hidden sm:inline font-mono text-[11px] tabular-nums ${
+                activeTab === 'dp_wd_history' ? 'text-emerald-100' : 'text-slate-400'
               }`}
             >
-              · {depositSummary.totalCount}
+              · {dpWdSummary.totalCount}
             </span>
           )}
         </button>
+
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'invitation'}
+          data-testid="wallet-tab-invitation"
+          onClick={() => setActiveTab('invitation')}
+          className={`px-2 sm:px-3.5 py-2 rounded-lg text-[11px] sm:text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 ${
+            activeTab === 'invitation'
+              ? 'bg-amber-500 text-slate-950 font-bold shadow-sm'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/70'
+          }`}
+        >
+          <Gift className="hidden sm:inline-block w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          <span>Invitation Code</span>
+        </button>
       </div>
 
-      {activeTab === 'overview' ? (
+      {/* TAB 1: WALLET OVERVIEW */}
+      {activeTab === 'overview' && (
         <>
           {/* Profile & Wallet Summary */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4">
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-              {/* Identity & Invitation */}
+              {/* Identity & Quick Account Summary */}
               <div className="lg:col-span-7 space-y-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-start gap-3 min-w-0">
@@ -274,21 +335,38 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
                   </div>
                 </div>
 
-                <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-[10px] sm:text-xs font-semibold text-amber-400">
-                      Invitation Program · $1 Sign-Up + 2% First Deposit
-                    </p>
-                    <p className="text-[10px] sm:text-xs font-mono text-slate-300 truncate">
-                      {user.uid}
-                    </p>
-                  </div>
+                {/* Hairline Account Quick Strip */}
+                <div className="grid grid-cols-2 divide-x divide-slate-800 bg-slate-950 border border-slate-800 rounded-xl">
                   <button
                     type="button"
-                    onClick={onCopyReferral}
-                    className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 text-[10px] sm:text-xs font-semibold shrink-0 whitespace-nowrap"
+                    onClick={() => setActiveTab('dp_wd_history')}
+                    className="p-3 text-left hover:bg-slate-900/60 transition-colors rounded-l-xl"
                   >
-                    Copy Code
+                    <span className="text-[10px] sm:text-[11px] text-slate-400 block">
+                      DP &amp; WD Activity
+                    </span>
+                    <span className="text-xs sm:text-sm font-bold text-white font-mono tabular-nums mt-0.5 block">
+                      {dpWdSummary.totalCount} Requests
+                      {dpWdSummary.pendingCount > 0 && (
+                        <span className="text-amber-400 font-normal">
+                          {' '}
+                          · {dpWdSummary.pendingCount} pending
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('invitation')}
+                    className="p-3 text-left hover:bg-slate-900/60 transition-colors rounded-r-xl"
+                  >
+                    <span className="text-[10px] sm:text-[11px] text-slate-400 block">
+                      Invitation Rewards
+                    </span>
+                    <span className="text-xs sm:text-sm font-bold text-amber-400 font-mono tabular-nums mt-0.5 block">
+                      ${referralSummary.totalEarnedUsd.toFixed(2)} Earned
+                      <span className="text-slate-400 font-normal"> · View Code</span>
+                    </span>
                   </button>
                 </div>
               </div>
@@ -510,22 +588,26 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
             </div>
           )}
         </>
-      ) : (
-        /* DEPOSIT HISTORY TAB */
+      )}
+
+      {/* TAB 2: DP & WD HISTORY */}
+      {activeTab === 'dp_wd_history' && (
         <section
-          data-testid="wallet-deposit-history-panel"
-          aria-label="Deposit History"
+          data-testid="wallet-dp-wd-history-panel"
+          aria-label="Deposit and Withdrawal History"
           className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4"
         >
-          {/* Header & Primary Action */}
+          {/* Header & Primary Actions */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
             <div>
-              <h2 className="text-sm sm:text-base font-bold text-white">Deposit History</h2>
+              <h2 className="text-sm sm:text-base font-bold text-white">
+                Deposit &amp; Withdrawal History
+              </h2>
               <p className="text-[11px] sm:text-xs text-slate-400">
-                Track verification status for your pending and completed Real Account deposits.
+                Track verification and settlement status across all Real Account deposits and withdrawals.
               </p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
               <button
                 type="button"
                 onClick={onRefresh}
@@ -537,119 +619,181 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
               <button
                 type="button"
                 onClick={onOpenDepositModal}
-                data-testid="deposit-history-new-deposit-btn"
-                className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                data-testid="dpwd-new-deposit-btn"
+                className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
               >
                 <PlusCircle className="w-3.5 h-3.5" aria-hidden="true" />
                 <span>New Deposit</span>
               </button>
+              <button
+                type="button"
+                onClick={onOpenWithdrawModal}
+                data-testid="dpwd-new-withdraw-btn"
+                className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              >
+                <ArrowUpRight className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Withdraw</span>
+              </button>
+              {hasMoreDpWd && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllDpWd((prev) => !prev)}
+                  data-testid="dpwd-header-view-all-btn"
+                  aria-expanded={showAllDpWd}
+                  title={showAllDpWd ? 'Show latest 5 transactions' : `View all ${filteredDpWd.length} transactions`}
+                  className="px-2.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  {showAllDpWd ? (
+                    <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
+                  ) : (
+                    <LayoutList className="w-3.5 h-3.5" aria-hidden="true" />
+                  )}
+                  <span>{showAllDpWd ? 'Top 5' : `All (${filteredDpWd.length})`}</span>
+                </button>
+              )}
             </div>
           </div>
 
-          {/* Summary Strip (Flat single-elevation cells with tabular numerals) */}
+          {/* 3-Cell Hairline-Divided Summary Strip */}
           <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-slate-800 bg-slate-950 border border-slate-800 rounded-xl">
             <div className="p-3 sm:p-3.5">
-              <p className="text-[11px] text-slate-400">Total Completed Deposits</p>
+              <p className="text-[11px] text-slate-400">Completed Deposits</p>
               <p className="text-base sm:text-lg font-extrabold text-emerald-400 font-mono tabular-nums mt-0.5">
                 $
-                {depositSummary.totalCompletedUsd.toLocaleString('en-US', {
+                {dpWdSummary.totalCompletedDepositsUsd.toLocaleString('en-US', {
                   minimumFractionDigits: 2,
                   maximumFractionDigits: 2,
                 })}
               </p>
               <p className="text-[11px] text-slate-500 font-mono tabular-nums">
-                {depositSummary.completedCount} completed
+                {dpWdSummary.depositCount} deposit requests
               </p>
             </div>
             <div className="p-3 sm:p-3.5">
-              <p className="text-[11px] text-slate-400">Pending Verification</p>
+              <p className="text-[11px] text-slate-400">Completed Withdrawals</p>
+              <p className="text-base sm:text-lg font-extrabold text-blue-400 font-mono tabular-nums mt-0.5">
+                $
+                {dpWdSummary.totalCompletedWithdrawalsUsd.toLocaleString('en-US', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
+              </p>
+              <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                {dpWdSummary.withdrawalCount} withdrawal requests
+              </p>
+            </div>
+            <div className="p-3 sm:p-3.5">
+              <p className="text-[11px] text-slate-400">Pending Review</p>
               <p className="text-base sm:text-lg font-extrabold text-amber-400 font-mono tabular-nums mt-0.5">
                 $
-                {depositSummary.totalPendingUsd.toLocaleString('en-US', {
+                {dpWdSummary.totalPendingUsd.toLocaleString('en-US', {
                   minimumFractionDigits: 2,
                   maximumFractionDigits: 2,
                 })}
               </p>
               <p className="text-[11px] text-slate-500 font-mono tabular-nums">
-                {depositSummary.pendingCount} pending
-              </p>
-            </div>
-            <div className="p-3 sm:p-3.5">
-              <p className="text-[11px] text-slate-400">All Deposit Requests</p>
-              <p className="text-base sm:text-lg font-extrabold text-white font-mono tabular-nums mt-0.5">
-                {depositSummary.totalCount}
-              </p>
-              <p className="text-[11px] text-slate-500 font-mono tabular-nums">
-                {depositSummary.rejectedCount} rejected
+                {dpWdSummary.pendingCount} pending · {dpWdSummary.rejectedCount} rejected
               </p>
             </div>
           </div>
 
-          {/* Filter Tabs & Search */}
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
-            <div
-              role="group"
-              aria-label="Filter deposits by status"
-              className="grid grid-cols-4 sm:inline-flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-[11px] font-semibold"
-            >
-              {(
-                [
-                  { id: 'all', label: `All (${depositSummary.totalCount})` },
-                  { id: 'pending', label: `Pending (${depositSummary.pendingCount})` },
-                  { id: 'completed', label: `Completed (${depositSummary.completedCount})` },
-                  { id: 'rejected', label: `Rejected (${depositSummary.rejectedCount})` },
-                ] as const
-              ).map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  data-testid={`deposit-filter-${item.id}`}
-                  onClick={() => setDepositFilter(item.id)}
-                  className={`px-2.5 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                    depositFilter === item.id
-                      ? 'bg-slate-800 text-white font-bold'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {item.label}
-                </button>
-              ))}
+          {/* Type + Status Filters & Search */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              {/* Kind Switcher */}
+              <div
+                role="group"
+                aria-label="Filter by transaction kind"
+                className="grid grid-cols-3 sm:inline-flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-[11px] font-semibold"
+              >
+                {(
+                  [
+                    { id: 'all', label: `All (${dpWdSummary.totalCount})` },
+                    { id: 'deposit', label: `Deposits (${dpWdSummary.depositCount})` },
+                    { id: 'withdrawal', label: `Withdrawals (${dpWdSummary.withdrawalCount})` },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    data-testid={`dpwd-kind-${item.id}`}
+                    onClick={() => setKindFilter(item.id)}
+                    className={`px-2.5 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                      kindFilter === item.id
+                        ? 'bg-emerald-600 text-white font-bold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Status Switcher */}
+              <div
+                role="group"
+                aria-label="Filter by request status"
+                className="grid grid-cols-4 sm:inline-flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-[11px] font-semibold"
+              >
+                {(
+                  [
+                    { id: 'all', label: 'All' },
+                    { id: 'pending', label: 'Pending' },
+                    { id: 'completed', label: 'Completed' },
+                    { id: 'rejected', label: 'Rejected' },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    data-testid={`dpwd-status-${item.id}`}
+                    onClick={() => setStatusFilter(item.id)}
+                    className={`px-2.5 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                      statusFilter === item.id
+                        ? 'bg-slate-800 text-white font-bold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="relative w-full md:w-64">
+            <div className="relative w-full lg:w-64">
               <Search
                 className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
                 aria-hidden="true"
               />
               <input
                 type="search"
-                aria-label="Search deposit transactions"
-                data-testid="deposit-history-search"
-                value={depositSearch}
-                onChange={(e) => setDepositSearch(e.target.value)}
-                placeholder="Search method or Tx ID..."
+                aria-label="Search deposit and withdrawal transactions"
+                data-testid="dpwd-history-search"
+                value={dpWdSearch}
+                onChange={(e) => setDpWdSearch(e.target.value)}
+                placeholder="Search method, account, or Tx..."
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
               />
             </div>
           </div>
 
           {/* Transactions Table / Mobile List / Empty State */}
-          {filteredDeposits.length === 0 ? (
+          {filteredDpWd.length === 0 ? (
             <div
-              data-testid="deposit-history-empty"
+              data-testid="dpwd-history-empty"
               className="bg-slate-950 border border-slate-800 rounded-xl py-10 px-4 text-center space-y-2.5"
             >
               <p className="text-xs sm:text-sm font-semibold text-slate-300">
-                {depositSummary.totalCount === 0
-                  ? 'No deposit transactions recorded yet.'
-                  : 'No deposit transactions match the selected filter.'}
+                {dpWdSummary.totalCount === 0
+                  ? 'No deposit or withdrawal transactions recorded yet.'
+                  : 'No transactions match the selected filters.'}
               </p>
               <p className="text-[11px] text-slate-500 max-w-md mx-auto">
-                {depositSummary.totalCount === 0
-                  ? 'Submit a Real Account deposit via KBZPay, WavePay, USDT TRC20, or Bitcoin to fund your account and unlock withdrawals.'
-                  : 'Try switching status filters or clearing your search query.'}
+                {dpWdSummary.totalCount === 0
+                  ? 'Submit a Real Account deposit via KBZPay, WavePay, USDT TRC20, or Bitcoin to fund your wallet and unlock withdrawals.'
+                  : 'Try switching transaction type or status filters, or clear your search query.'}
               </p>
-              {depositSummary.totalCount === 0 ? (
+              {dpWdSummary.totalCount === 0 ? (
                 <button
                   type="button"
                   onClick={onOpenDepositModal}
@@ -662,12 +806,13 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setDepositFilter('all');
-                    setDepositSearch('');
+                    setKindFilter('all');
+                    setStatusFilter('all');
+                    setDpWdSearch('');
                   }}
                   className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition-colors"
                 >
-                  Show All Deposits
+                  Reset Filters
                 </button>
               )}
             </div>
@@ -678,24 +823,40 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
                 <table className="w-full text-left text-xs tabular-nums">
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-400 text-[11px]">
+                      <th className="py-2.5 px-3.5 font-semibold">Type</th>
                       <th className="py-2.5 px-3.5 font-semibold">Method</th>
-                      <th className="py-2.5 px-3.5 font-semibold">Reference / Details</th>
+                      <th className="py-2.5 px-3.5 font-semibold">Reference / Account</th>
                       <th className="py-2.5 px-3.5 font-semibold text-right">Amount (USD)</th>
                       <th className="py-2.5 px-3.5 font-semibold">Status</th>
                       <th className="py-2.5 px-3.5 font-semibold text-right">Submitted</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/70">
-                    {filteredDeposits.map((tx) => {
+                    {visibleDpWd.map((tx) => {
+                      const isDeposit = isDepositTransaction(tx);
                       const normStatus = normalizeDepositStatus(tx.status);
                       const statusLabel = formatDepositStatusLabel(normStatus);
                       const methodLabel = extractDepositMethodLabel(tx.type);
                       return (
                         <tr
                           key={tx.id}
-                          data-testid={`deposit-row-${tx.id}`}
+                          data-testid={`dpwd-row-${tx.id}`}
                           className="hover:bg-slate-900/60 transition-colors"
                         >
+                          <td className="py-2.5 px-3.5 whitespace-nowrap">
+                            <span
+                              className={`inline-flex items-center gap-1.5 font-semibold ${
+                                isDeposit ? 'text-emerald-400' : 'text-blue-400'
+                              }`}
+                            >
+                              {isDeposit ? (
+                                <ArrowDownLeft className="w-3.5 h-3.5" aria-hidden="true" />
+                              ) : (
+                                <ArrowUpRight className="w-3.5 h-3.5" aria-hidden="true" />
+                              )}
+                              <span>{isDeposit ? 'Deposit' : 'Withdrawal'}</span>
+                            </span>
+                          </td>
                           <td className="py-2.5 px-3.5 font-semibold text-white whitespace-nowrap">
                             {methodLabel}
                           </td>
@@ -707,8 +868,12 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
                               </span>
                             )}
                           </td>
-                          <td className="py-2.5 px-3.5 text-right font-mono font-bold text-amber-400 whitespace-nowrap">
-                            ${Number(tx.amount || 0).toFixed(2)}
+                          <td
+                            className={`py-2.5 px-3.5 text-right font-mono font-bold whitespace-nowrap ${
+                              isDeposit ? 'text-emerald-400' : 'text-amber-400'
+                            }`}
+                          >
+                            {isDeposit ? '+' : '-'}${Number(tx.amount || 0).toFixed(2)}
                           </td>
                           <td className="py-2.5 px-3.5 whitespace-nowrap">
                             <span
@@ -742,7 +907,8 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
 
               {/* Mobile Card Rows */}
               <div className="md:hidden space-y-2">
-                {filteredDeposits.map((tx) => {
+                {visibleDpWd.map((tx) => {
+                  const isDeposit = isDepositTransaction(tx);
                   const normStatus = normalizeDepositStatus(tx.status);
                   const statusLabel = formatDepositStatusLabel(normStatus);
                   const methodLabel = extractDepositMethodLabel(tx.type);
@@ -752,16 +918,35 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
                       className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1.5"
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <strong className="text-xs text-white">{methodLabel}</strong>
-                        <span className="text-sm font-extrabold font-mono tabular-nums text-amber-400">
-                          ${Number(tx.amount || 0).toFixed(2)}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-bold shrink-0 ${
+                              isDeposit ? 'text-emerald-400' : 'text-blue-400'
+                            }`}
+                          >
+                            {isDeposit ? (
+                              <ArrowDownLeft className="w-3.5 h-3.5" aria-hidden="true" />
+                            ) : (
+                              <ArrowUpRight className="w-3.5 h-3.5" aria-hidden="true" />
+                            )}
+                            <span>{isDeposit ? 'Deposit' : 'Withdrawal'}</span>
+                          </span>
+                          <span className="text-slate-600">·</span>
+                          <strong className="text-xs text-white truncate">{methodLabel}</strong>
+                        </div>
+                        <span
+                          className={`text-sm font-extrabold font-mono tabular-nums shrink-0 ${
+                            isDeposit ? 'text-emerald-400' : 'text-amber-400'
+                          }`}
+                        >
+                          {isDeposit ? '+' : '-'}${Number(tx.amount || 0).toFixed(2)}
                         </span>
                       </div>
                       <p className="text-[11px] font-mono text-slate-300 break-all">
                         {sanitizeMemberNoticeText(tx.target)}
                       </p>
                       {tx.rejectReason && (
-                        <p className="text-[10px] text-red-400">
+                        <p className="text-[10px] text-red-400 break-words">
                           Reason: {sanitizeMemberNoticeText(tx.rejectReason)}
                         </p>
                       )}
@@ -790,11 +975,192 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
                   );
                 })}
               </div>
+
+              {/* View All / Collapse Toggle Row */}
+              {hasMoreDpWd && (
+                <div className="flex items-center justify-between gap-2 pt-1 text-[11px] text-slate-400">
+                  <span className="font-mono tabular-nums">
+                    Showing {visibleDpWd.length} of {filteredDpWd.length}
+                  </span>
+                  <button
+                    type="button"
+                    data-testid="dpwd-view-all-btn"
+                    aria-expanded={showAllDpWd}
+                    onClick={() => setShowAllDpWd((prev) => !prev)}
+                    className="px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-amber-300 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+                  >
+                    {showAllDpWd ? (
+                      <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
+                    ) : (
+                      <LayoutList className="w-3.5 h-3.5" aria-hidden="true" />
+                    )}
+                    <span>{showAllDpWd ? 'Show Top 5' : `View All (${filteredDpWd.length})`}</span>
+                  </button>
+                </div>
+              )}
             </>
           )}
         </section>
       )}
+
+      {/* TAB 3: INVITATION CODE */}
+      {activeTab === 'invitation' && (
+        <section
+          data-testid="wallet-invitation-panel"
+          aria-label="Invitation Code and Referral Rewards"
+          className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+            <div>
+              <h2 className="text-sm sm:text-base font-bold text-white">
+                Invitation Code &amp; Referral Program
+              </h2>
+              <p className="text-[11px] sm:text-xs text-slate-400">
+                Share your invitation code or direct link to earn Real Account rewards when new traders join.
+              </p>
+            </div>
+            <span className="text-[11px] font-mono text-amber-400 shrink-0">
+              $1.00 Sign-Up + 2% 1st Deposit
+            </span>
+          </div>
+
+          {/* Code & Share Box */}
+          <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="min-w-0 space-y-1">
+              <p className="text-[11px] font-semibold text-slate-400">
+                Your Personal Invitation Code
+              </p>
+              <p
+                data-testid="invitation-code-value"
+                className="text-sm sm:text-base font-extrabold font-mono text-amber-400 break-all select-all"
+              >
+                {user.uid}
+              </p>
+              <p className="text-[10px] sm:text-[11px] font-mono text-slate-500 truncate">
+                {inviteLink}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                data-testid="invitation-copy-code-btn"
+                onClick={handleCopyInviteCode}
+                className="px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              >
+                {copiedCodeFeedback ? (
+                  <Check className="w-3.5 h-3.5" aria-hidden="true" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                )}
+                <span>{copiedCodeFeedback ? 'Code Copied' : 'Copy Code'}</span>
+              </button>
+              <button
+                type="button"
+                data-testid="invitation-copy-link-btn"
+                onClick={handleCopyInviteLink}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              >
+                {copiedLinkFeedback ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
+                ) : (
+                  <Link2 className="w-3.5 h-3.5 text-blue-400" aria-hidden="true" />
+                )}
+                <span>{copiedLinkFeedback ? 'Link Copied' : 'Copy Invite Link'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* 3-Cell Reward Schedule & Earnings Strip */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-slate-800 bg-slate-950 border border-slate-800 rounded-xl">
+            <div className="p-3 sm:p-3.5">
+              <p className="text-[11px] text-slate-400">Sign-Up Bonus</p>
+              <p className="text-base sm:text-lg font-extrabold text-amber-400 font-mono tabular-nums mt-0.5">
+                $1.00 USD
+              </p>
+              <p className="text-[11px] text-slate-500">Per verified registration</p>
+            </div>
+            <div className="p-3 sm:p-3.5">
+              <p className="text-[11px] text-slate-400">First Deposit Commission</p>
+              <p className="text-base sm:text-lg font-extrabold text-emerald-400 font-mono tabular-nums mt-0.5">
+                2.00%
+              </p>
+              <p className="text-[11px] text-slate-500">On invitee&apos;s first approved deposit</p>
+            </div>
+            <div className="p-3 sm:p-3.5">
+              <p className="text-[11px] text-slate-400">Your Earned Rewards</p>
+              <p className="text-base sm:text-lg font-extrabold text-white font-mono tabular-nums mt-0.5">
+                $
+                {referralSummary.totalEarnedUsd.toLocaleString('en-US', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
+              </p>
+              <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                {referralSummary.count} credited payouts
+              </p>
+            </div>
+          </div>
+
+          {/* 3-Step Workflow Guide */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-1">
+              <p className="text-xs font-bold text-white font-mono">01. Share Code or Link</p>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Send your invitation code or personal referral URL to friends registering on Zectrade Pulse.
+              </p>
+            </div>
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-1">
+              <p className="text-xs font-bold text-white font-mono">02. Friend Registers</p>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                When they register using your code, your Real Account automatically receives a $1.00 bonus.
+              </p>
+            </div>
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-1">
+              <p className="text-xs font-bold text-white font-mono">03. First Deposit Payout</p>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Receive an automatic 2.00% USDT reward when your invited member&apos;s first deposit is approved.
+              </p>
+            </div>
+          </div>
+
+          {/* Referral Reward Payouts Log */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold text-slate-200">Referral Reward History</h3>
+              <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                {referralSummary.count} entries
+              </span>
+            </div>
+            {referralSummary.items.length === 0 ? (
+              <div className="bg-slate-950 border border-slate-800 rounded-xl py-6 px-4 text-center">
+                <p className="text-xs text-slate-400">
+                  No referral rewards credited yet. Copy your invitation code above to invite traders.
+                </p>
+              </div>
+            ) : (
+              <div className="bg-slate-950 border border-slate-800 rounded-xl divide-y divide-slate-800/80">
+                {referralSummary.items.map((tx) => (
+                  <div
+                    key={tx.id}
+                    className="p-3 flex items-center justify-between gap-2 text-xs tabular-nums"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-semibold text-white truncate">{tx.type}</p>
+                      <p className="text-[11px] font-mono text-slate-400 truncate">
+                        {sanitizeMemberNoticeText(tx.target)} · {tx.timestamp}
+                      </p>
+                    </div>
+                    <span className="font-mono font-bold text-emerald-400 shrink-0">
+                      +${Number(tx.amount || 0).toFixed(2)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
     </div>
   );
 };
-

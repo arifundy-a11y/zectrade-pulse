@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_BRAND_LOGO_URL,
   FIRST_REGISTER_REAL_BONUS_USD,
   calculateCloseSettlement,
   calculatePositionPreview,
@@ -19,6 +20,7 @@ import {
   generateWalletCsv,
   getAllowedStaffTabs,
   getCleanSymbol,
+  normalizeBrandLogoUrl,
   sanitizeMemberNoticeText,
   shouldLiquidatePosition,
   shouldTriggerPreOrder,
@@ -710,6 +712,21 @@ test('normalizeMemberProfileInput validates profile fields, withdraw method, PIN
     target: '09988223344',
   });
 });
+
+test('normalizeBrandLogoUrl validates custom URLs, uploaded base64 icons, default reset, and rejects unsafe URIs', () => {
+  assert.deepEqual(normalizeBrandLogoUrl(''), { ok: true, url: null });
+  assert.deepEqual(normalizeBrandLogoUrl(DEFAULT_BRAND_LOGO_URL), { ok: true, url: null });
+
+  const httpsRes = normalizeBrandLogoUrl('https://cdn.example.com/brand-logo.png');
+  assert.deepEqual(httpsRes, { ok: true, url: 'https://cdn.example.com/brand-logo.png' });
+
+  const svgData = 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=';
+  assert.deepEqual(normalizeBrandLogoUrl(svgData), { ok: true, url: svgData });
+
+  const xssRes = normalizeBrandLogoUrl('javascript:alert(1)');
+  assert.equal(xssRes.ok, false);
+});
+
 
 
 

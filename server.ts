@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -53,7 +54,7 @@ import {
 } from './src/db/news.ts';
 import type { ChartTimeframe } from './src/utils/chartEngine.ts';
 import { normalizeNewsArticleInput } from './src/utils/newsUtils.ts';
-import { normalizeMemberProfileInput } from './src/utils/tradingEngine.ts';
+import { normalizeBrandLogoUrl, normalizeMemberProfileInput } from './src/utils/tradingEngine.ts';
 import {
   createAdminSessionToken,
   requireAdmin,
@@ -75,12 +76,56 @@ function timingSafeEqualString(a: string, b: string): boolean {
   return crypto.timingSafeEqual(hashA, hashB);
 }
 
+const BRAND_CONFIG_PATH = path.join(__dirname, 'data', 'brand-config.json');
+let cachedBrandLogoUrl: string | null = null;
+
+async function readStoredBrandLogoUrl(): Promise<string | null> {
+  if (cachedBrandLogoUrl !== null) return cachedBrandLogoUrl;
+  try {
+    const raw = await fs.readFile(BRAND_CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as { logoUrl?: unknown };
+    const norm = normalizeBrandLogoUrl(parsed?.logoUrl ?? null);
+    cachedBrandLogoUrl = norm.ok ? norm.url : null;
+    return cachedBrandLogoUrl;
+  } catch {
+    return null;
+  }
+}
+
+async function writeStoredBrandLogoUrl(logoUrl: string | null): Promise<void> {
+  cachedBrandLogoUrl = logoUrl;
+  try {
+    await fs.mkdir(path.dirname(BRAND_CONFIG_PATH), { recursive: true });
+    await fs.writeFile(
+      BRAND_CONFIG_PATH,
+      JSON.stringify({ logoUrl, updatedAtMs: Date.now() }, null, 2),
+      'utf8'
+    );
+  } catch {
+    // Keep cached in memory if filesystem is read-only
+  }
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.get('/api/platform/branding', async (_req, res) => {
+    const logoUrl = await readStoredBrandLogoUrl();
+    res.json({ logoUrl });
+  });
+
+  app.post('/api/admin/branding', requireAdmin, async (req: AuthRequest, res) => {
+    const parsed = normalizeBrandLogoUrl(req.body?.logoUrl ?? null);
+    if (!parsed.ok) {
+      return res.status(400).json({ error: parsed.error });
+    }
+    await writeStoredBrandLogoUrl(parsed.url);
+    return res.json({ ok: true, logoUrl: parsed.url });
   });
 
   // Sync Firebase-authenticated user profile to Cloud SQL PostgreSQL

@@ -8,6 +8,7 @@ interface TopBarProps {
   csrTelegramLink: string;
   onPrimaryAction: () => void;
   primaryActionLabel: string;
+  brandLogoUrl?: string | null;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -17,16 +18,32 @@ export const TopBar: React.FC<TopBarProps> = ({
   csrTelegramLink,
   onPrimaryAction,
   primaryActionLabel,
+  brandLogoUrl,
 }) => {
+  const effectiveLogoUrl = brandLogoUrl?.trim() || '/favicon.svg';
+
   return (
     <header className="sticky top-0 z-30 h-13 sm:h-14 w-full bg-slate-950/95 backdrop-blur-md border-b border-slate-800/80 px-3 sm:px-6 flex items-center justify-between gap-4 sm:gap-8">
-      {/* Zone 1: Single-line Brand Wordmark */}
+      {/* Zone 1: Single-line Brand Wordmark + Icon */}
       <button
         type="button"
         onClick={() => onSelectSection('trade')}
-        className="text-sm sm:text-base font-extrabold tracking-tight text-white whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-blue-500 rounded"
+        className="flex items-center gap-2 text-sm sm:text-base font-extrabold tracking-tight text-white whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-blue-500 rounded"
       >
-        Zectrade Pulse
+        <img
+          src={effectiveLogoUrl}
+          alt="Zectrade Pulse logo"
+          data-testid="topbar-brand-logo"
+          onError={(e) => {
+            const img = e.currentTarget;
+            if (!img.dataset.fallbackApplied) {
+              img.dataset.fallbackApplied = '1';
+              img.src = '/favicon.svg';
+            }
+          }}
+          className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg object-cover border border-slate-800 bg-slate-900 shrink-0"
+        />
+        <span>Zectrade Pulse</span>
       </button>
 
       {/* Zone 2: 4 Concise Single-Line Navigation Links */}
@@ -98,6 +115,9 @@ export const TopBar: React.FC<TopBarProps> = ({
           </a>
           <a href="#faq-section" className="whitespace-nowrap shrink-0 hover:text-slate-200 transition-colors">
             FAQ
+          </a>
+          <a href="#about-platform" className="whitespace-nowrap shrink-0 hover:text-slate-200 transition-colors">
+            About
           </a>
           <a
             href={csrTelegramLink}

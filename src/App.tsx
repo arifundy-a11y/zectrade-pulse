@@ -46,10 +46,70 @@ import { TradingWorkspace } from './components/TradingWorkspace';
 import { WalletWorkspace } from './components/WalletWorkspace';
 import {
   deduplicateFirestoreAgainstSql,
-  mergeWalletTransactionsWithServerActivity,
-  type ServerWalletActivityRow,
 } from './utils/depositHistory';
-import { auth, db, googleAuthProvider, oauthAuth } from './services/firebaseClient';
+import {
+  auth,
+  db,
+  googleAuthProvider,
+  isFirebaseConfigured,
+  isOAuthFirebaseConfigured,
+  oauthAuth,
+} from './services/firebaseClient';
+import {
+  DEMO_USER_TEMPLATE,
+  INITIAL_QUOTES,
+  SEED_FEED,
+  SEED_MANAGED_MEMBERS,
+  mergeBuiltInAndCustomQuotes,
+} from './data/defaults';
+import {
+  claimAdminCoinProfitStatic,
+  deleteCustomCoinStatic,
+  getCoinTradeAnalyticsStatic,
+  getInitialAdminCoinsSync,
+  recordCoinTradeStatic,
+  syncAndListCustomCoinsStatic,
+  updateCoinPriceControlStatic,
+  upsertCustomCoinStatic,
+} from './services/coinsService';
+import {
+  adminScheduleDigitDrawStatic,
+  getInitialLotteryLiveState,
+  placeDigitLotteryBetStatic,
+  placeLotteryBetStatic,
+  tickAndGetLotteryStateStatic,
+  updateLotteryAdminConfigStatic,
+} from './services/lotteryService';
+import {
+  createNewsArticleStatic,
+  deleteNewsArticleStatic,
+  getInitialNewsArticlesSync,
+  listNewsArticlesStatic,
+  updateNewsArticleStatic,
+} from './services/newsService';
+import {
+  adjustMemberBalanceStatic,
+  applyWalletDeltaStatic,
+  approveDepositRequestStatic,
+  approveWithdrawalRequestStatic,
+  assignMemberRoleStatic,
+  authenticateStaticAdmin,
+  createWalletRequestStatic,
+  executeP2PTransferStatic,
+  getInitialPlatformSettingsSync,
+  getMemberWalletSyncStatic,
+  listMembersStatic,
+  listStaffRequestsStatic,
+  loadPublicPlatformSettingsStatic,
+  lookupTransferRecipientStatic,
+  rejectDepositRequestStatic,
+  rejectWithdrawalRequestStatic,
+  saveBrandLogoStatic,
+  saveFaqAndDescStatic,
+  savePlatformSettingsStatic,
+  syncMemberOnAuthStatic,
+  updateMemberFieldsStatic,
+} from './services/walletAdminService';
 import type {
   AccountMode,
   AdminManagedCoin,
@@ -99,262 +159,12 @@ import {
   validateSlTpTargets,
 } from './utils/tradingEngine';
 
-const INITIAL_QUOTES: MarketQuote[] = [
-  {
-    symbol: 'BTCUSDT',
-    tvSymbol: 'BINANCE:BTCUSDT',
-    label: 'BTC / USDT',
-    shortName: 'BTC/USDT',
-    price: 65867.66,
-    changePct: -1.42,
-    high24h: 67210.0,
-    low24h: 64980.0,
-  },
-  {
-    symbol: 'ETHUSDT',
-    tvSymbol: 'BINANCE:ETHUSDT',
-    label: 'ETH / USDT',
-    shortName: 'ETH/USDT',
-    price: 1835.4,
-    changePct: -2.18,
-    high24h: 1912.0,
-    low24h: 1805.0,
-  },
-  {
-    symbol: 'SOLUSDT',
-    tvSymbol: 'BINANCE:SOLUSDT',
-    label: 'SOL / USDT',
-    shortName: 'SOL/USDT',
-    price: 72.45,
-    changePct: 1.64,
-    high24h: 74.8,
-    low24h: 70.1,
-  },
-  {
-    symbol: 'BNBUSDT',
-    tvSymbol: 'BINANCE:BNBUSDT',
-    label: 'BNB / USDT',
-    shortName: 'BNB/USDT',
-    price: 598.4,
-    changePct: 0.92,
-    high24h: 612.0,
-    low24h: 584.5,
-  },
-  {
-    symbol: 'XRPUSDT',
-    tvSymbol: 'BINANCE:XRPUSDT',
-    label: 'XRP / USDT',
-    shortName: 'XRP/USDT',
-    price: 0.6845,
-    changePct: 2.34,
-    high24h: 0.701,
-    low24h: 0.652,
-  },
-  {
-    symbol: 'DOGEUSDT',
-    tvSymbol: 'BINANCE:DOGEUSDT',
-    label: 'DOGE / USDT',
-    shortName: 'DOGE/USDT',
-    price: 0.1842,
-    changePct: 3.15,
-    high24h: 0.192,
-    low24h: 0.174,
-  },
-  {
-    symbol: 'ADAUSDT',
-    tvSymbol: 'BINANCE:ADAUSDT',
-    label: 'ADA / USDT',
-    shortName: 'ADA/USDT',
-    price: 0.462,
-    changePct: -0.84,
-    high24h: 0.478,
-    low24h: 0.451,
-  },
-  {
-    symbol: 'AVAXUSDT',
-    tvSymbol: 'BINANCE:AVAXUSDT',
-    label: 'AVAX / USDT',
-    shortName: 'AVAX/USDT',
-    price: 24.85,
-    changePct: 1.48,
-    high24h: 25.9,
-    low24h: 23.9,
-  },
-  {
-    symbol: 'LINKUSDT',
-    tvSymbol: 'BINANCE:LINKUSDT',
-    label: 'LINK / USDT',
-    shortName: 'LINK/USDT',
-    price: 13.72,
-    changePct: 0.76,
-    high24h: 14.2,
-    low24h: 13.15,
-  },
-  {
-    symbol: 'TONUSDT',
-    tvSymbol: 'BINANCE:TONUSDT',
-    label: 'TON / USDT',
-    shortName: 'TON/USDT',
-    price: 4.825,
-    changePct: 1.12,
-    high24h: 4.98,
-    low24h: 4.68,
-  },
-  {
-    symbol: 'GOLD',
-    tvSymbol: 'BINANCE:PAXGUSDT',
-    label: 'GOLD (XAU)',
-    shortName: 'XAU/USD',
-    price: 4135.61,
-    changePct: 0.38,
-    high24h: 4158.0,
-    low24h: 4112.0,
-  },
-  {
-    symbol: 'USOIL',
-    tvSymbol: 'TVC:USOIL',
-    label: 'WTI / USD',
-    shortName: 'WTI/USD',
-    price: 89.97,
-    changePct: -0.22,
-    high24h: 91.1,
-    low24h: 88.85,
-  },
-];
-
-const DEFAULT_FAQ: FaqEntry[] = [
-  {
-    q: 'How do I get started with Zectrade Pulse?',
-    a: 'Register with your email or launch the instant Demo Workspace to trade with $100,000 virtual capital and join Lottery Live Red/Green prediction rounds.',
-  },
-  {
-    q: 'What payment gateways are supported for Real Accounts?',
-    a: 'KBZPay (KPay), WavePay, Bank Transfers, and USDT TRC20 wallets are supported with 4-digit PIN authorization.',
-  },
-  {
-    q: 'How does Lottery Live Red/Green trading work?',
-    a: 'Select Green or Red before the final 5-second countdown lock. A 0.12% platform fee per bet and exact 2x net payouts are displayed before you confirm.',
-  },
-  {
-    q: 'What leverage tiers and trading fees apply?',
-    a: 'Spot (1x) and Futures Leverage (5x–100x) are supported with a 0.18% open fee and a 0.18% close fee per trade.',
-  },
-];
-
-const DEFAULT_DESCRIPTION =
-  'Zectrade Pulse combines low-latency multi-asset spot & futures execution across BTC, ETH, SOL, Gold (XAU), and WTI Crude with real-time Red/Green Lottery Live prediction rounds engineered for mobile and desktop.';
-
-const DEFAULT_DEPOSIT_ACCOUNTS: DepositAccounts = {
-  kpay: { name: 'Zectrade Official', number: '09789123456' },
-  wavepay: { name: 'Zectrade Agent', number: '09987654321' },
-  usdt: { name: 'TRC20 Wallet', number: 'TX982353835ks839209485732' },
-  btc: { name: 'Bitcoin Network', number: 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh' },
-};
-
-const SEED_FEED: LiveFeedItem[] = [
-  { id: 'f1', type: 'WITHDRAWAL', method: 'KBZPay', amount: 850, user: '097***841', time: 'Just now' },
-  { id: 'f2', type: 'DEPOSIT', method: 'WavePay', amount: 300, user: '099***120', time: '1 min ago' },
-  { id: 'f3', type: 'WITHDRAWAL', method: 'USDT TRC20', amount: 980, user: '0x8f...e3a', time: '2 mins ago' },
-  { id: 'f4', type: 'DEPOSIT', method: 'KBZPay', amount: 150, user: '094***559', time: '3 mins ago' },
-];
-
-const DEMO_USER_TEMPLATE: UserProfile = {
-  uid: 'DEMO-ZEC-8841',
-  isLoggedIn: true,
-  isLocalDemoSession: true,
-  username: 'Demo Trader',
-  email: 'demo@zectrade.local',
-  pin: '1234',
-  role: 'user',
-  isBlocked: false,
-  isWithdrawBlocked: false,
-  invitedBy: null,
-  hasDepositedBefore: false,
-  hasTradedAfterDeposit: false,
-  withdrawLockClearedByAdmin: false,
-  demoBalance: 100000,
-  realBalance: FIRST_REGISTER_REAL_BONUS_USD,
-  spotHoldings: {},
-  avatarUrl: null,
-  fullName: null,
-  phone: null,
-  country: null,
-  bio: null,
-  withdrawMethod: 'kpay',
-  withdrawAccountName: null,
-  withdrawAccountNumber: null,
-};
-
-const SEED_MANAGED_MEMBERS: ManagedMember[] = [
-  {
-    uid: 'USR-9012',
-    username: 'Aung Kyaw',
-    email: 'aung.kyaw@zectrade.io',
-    role: 'user',
-    isBlocked: false,
-    isWithdrawBlocked: false,
-    hasDepositedBefore: false,
-    hasTradedAfterDeposit: false,
-    withdrawLockClearedByAdmin: false,
-    realBalance: 2.0,
-    demoBalance: 98500,
-    securityPin: '1234',
-    fullName: 'Aung Kyaw Moe',
-    phone: '09789445566',
-    country: 'Yangon, Myanmar',
-    bio: 'Spot & Futures Trader',
-    withdrawMethod: 'kpay',
-    withdrawAccountName: 'Aung Kyaw Moe',
-    withdrawAccountNumber: '09789445566',
-  },
-  {
-    uid: 'USR-4418',
-    username: 'Su Myat',
-    email: 'sumyat@zectrade.io',
-    role: 'user',
-    isBlocked: false,
-    isWithdrawBlocked: false,
-    hasDepositedBefore: true,
-    hasTradedAfterDeposit: false,
-    withdrawLockClearedByAdmin: false,
-    realBalance: 1120.0,
-    demoBalance: 100000,
-    securityPin: '4321',
-    fullName: 'Su Myat Noe',
-    phone: '09988223344',
-    country: 'Mandalay, Myanmar',
-    bio: 'Gold & Crypto Trader',
-    withdrawMethod: 'wavepay',
-    withdrawAccountName: 'Su Myat Noe',
-    withdrawAccountNumber: '09988223344',
-  },
-  {
-    uid: 'USR-7731',
-    username: 'Marcus Chen',
-    email: 'marcus.c@zectrade.io',
-    role: 'staff',
-    isBlocked: false,
-    isWithdrawBlocked: false,
-    hasDepositedBefore: true,
-    hasTradedAfterDeposit: true,
-    withdrawLockClearedByAdmin: false,
-    realBalance: 8900.0,
-    demoBalance: 120000,
-    securityPin: '8888',
-    fullName: 'Marcus Chen',
-    phone: '+65 8123 4567',
-    country: 'Singapore',
-    bio: 'Senior Desk Operator',
-    withdrawMethod: 'usdt',
-    withdrawAccountName: 'Marcus Chen',
-    withdrawAccountNumber: 'TX982353835ks839209485732',
-  },
-];
-
 const STORAGE_KEY = 'zectrade_pulse_workspace_v1';
 
 export default function App() {
-  const [quotes, setQuotes] = useState<MarketQuote[]>(INITIAL_QUOTES);
+  const [quotes, setQuotes] = useState<MarketQuote[]>(() =>
+    mergeBuiltInAndCustomQuotes(INITIAL_QUOTES, getInitialAdminCoinsSync(false))
+  );
   const [selectedSymbol, setSelectedSymbol] = useState<MarketSymbol>('BTCUSDT');
   const [activeSection, setActiveSection] = useState<AppSection>('trade');
   const [accountMode, setAccountMode] = useState<AccountMode>('demo');
@@ -429,22 +239,22 @@ export default function App() {
     }
   });
 
-  const [csrTelegramLink, setCsrTelegramLink] = useState('https://t.me/zectrade_csr');
-  const [platformStats, setPlatformStats] = useState<PlatformStats>({
-    membersCount: 23909,
-    totalDeposits: '$42,850,910',
-    totalWithdrawals: '$15,240,600',
-  });
-  const [platformDescription, setPlatformDescription] = useState(DEFAULT_DESCRIPTION);
-  const [faqEntries, setFaqEntries] = useState<FaqEntry[]>(DEFAULT_FAQ);
+  const initialPlatform = getInitialPlatformSettingsSync();
+  const [csrTelegramLink, setCsrTelegramLink] = useState(initialPlatform.csrTelegramLink);
+  const [platformStats, setPlatformStats] = useState<PlatformStats>(initialPlatform.platformStats);
+  const [platformDescription, setPlatformDescription] = useState(initialPlatform.platformDescription);
+  const [faqEntries, setFaqEntries] = useState<FaqEntry[]>(initialPlatform.faqEntries);
   const [liveFeedItems, setLiveFeedItems] = useState<LiveFeedItem[]>(SEED_FEED);
-  const [depositRateMMK, setDepositRateMMK] = useState(4300);
-  const [withdrawRateMMK, setWithdrawRateMMK] = useState(4300);
-  const [depositAccounts, setDepositAccounts] = useState<DepositAccounts>(DEFAULT_DEPOSIT_ACCOUNTS);
+  const [depositRateMMK, setDepositRateMMK] = useState(initialPlatform.depositRateMMK);
+  const [withdrawRateMMK, setWithdrawRateMMK] = useState(initialPlatform.withdrawRateMMK);
+  const [depositAccounts, setDepositAccounts] = useState<DepositAccounts>(initialPlatform.depositAccounts);
+  const [brandLogoUrl, setBrandLogoUrl] = useState<string | null>(initialPlatform.brandLogoUrl);
 
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [authToken, setAuthToken] = useState<string | null>(null);
-  const [lotteryState, setLotteryState] = useState<LotteryLiveState | null>(null);
+  const [lotteryState, setLotteryState] = useState<LotteryLiveState | null>(() =>
+    getInitialLotteryLiveState(user.uid, user.role === 'admin')
+  );
   const [latestLotteryBanner, setLatestLotteryBanner] = useState<{
     roundCode: string;
     winningColor: LotteryColor;
@@ -458,7 +268,9 @@ export default function App() {
   const [pendingDeposits, setPendingDeposits] = useState<StaffWalletRequest[]>([]);
   const [pendingWithdrawals, setPendingWithdrawals] = useState<StaffWalletRequest[]>([]);
   const [staffRequestsLoading, setStaffRequestsLoading] = useState(false);
-  const [adminCoins, setAdminCoins] = useState<AdminManagedCoin[]>([]);
+  const [adminCoins, setAdminCoins] = useState<AdminManagedCoin[]>(() =>
+    getInitialAdminCoinsSync(true)
+  );
   const [selectedCoinAnalytics, setSelectedCoinAnalytics] = useState<CoinTradeAnalytics | null>(null);
   const [coinAnalyticsLoading, setCoinAnalyticsLoading] = useState(false);
   const closingIdsRef = useRef<Set<string>>(new Set());
@@ -484,8 +296,12 @@ export default function App() {
   const [walletHistoryModalOpen, setWalletHistoryModalOpen] = useState(false);
   const [staffModalOpen, setStaffModalOpen] = useState(false);
   const [staffModalInitialTab, setStaffModalInitialTab] = useState<StaffTabId | undefined>(undefined);
-  const [newsArticles, setNewsArticles] = useState<NewsArticle[]>([]);
-  const [adminNewsArticles, setAdminNewsArticles] = useState<NewsArticle[]>([]);
+  const [newsArticles, setNewsArticles] = useState<NewsArticle[]>(() =>
+    getInitialNewsArticlesSync(false)
+  );
+  const [adminNewsArticles, setAdminNewsArticles] = useState<NewsArticle[]>(() =>
+    getInitialNewsArticlesSync(true)
+  );
   const [newsLoading, setNewsLoading] = useState(false);
   const [adminNewsLoading, setAdminNewsLoading] = useState(false);
 
@@ -518,41 +334,50 @@ export default function App() {
     }
   }, [user, preOrders, activePositions, tradeHistory, walletTransactions, priceAlerts, managedMembers]);
 
-  // Load Public Settings from Firestore safely
+  // Sync Browser Tab Favicon dynamically with Admin Brand Logo or /logo.png
+  useEffect(() => {
+    const targetHref = brandLogoUrl?.trim() || '/logo.png';
+    const rels = ['icon', 'apple-touch-icon'];
+    rels.forEach((rel) => {
+      let link = document.querySelector<HTMLLinkElement>(`link[rel="${rel}"]`);
+      if (!link) {
+        link = document.createElement('link');
+        link.rel = rel;
+        document.head.appendChild(link);
+      }
+      link.href = targetHref;
+      if (targetHref.endsWith('.svg') || targetHref.startsWith('data:image/svg+xml')) {
+        link.type = 'image/svg+xml';
+      } else if (targetHref.endsWith('.png') || targetHref.startsWith('data:image/png')) {
+        link.type = 'image/png';
+      } else {
+        link.removeAttribute('type');
+      }
+    });
+    try {
+      if (brandLogoUrl) {
+        localStorage.setItem('zectrade_brand_logo_v1', brandLogoUrl);
+      } else {
+        localStorage.removeItem('zectrade_brand_logo_v1');
+      }
+    } catch {
+      // ignore storage quota
+    }
+  }, [brandLogoUrl]);
+
+  // Load Public Settings from Firestore + localStorage safely
   useEffect(() => {
     const loadPublicSettings = async () => {
-      try {
-        const [faqSnap, csrSnap, statsSnap, accSnap, rateSnap] = await Promise.all([
-          getDoc(doc(db, 'settings', 'faqConfig')),
-          getDoc(doc(db, 'settings', 'csrConfig')),
-          getDoc(doc(db, 'settings', 'landingStats')),
-          getDoc(doc(db, 'settings', 'depositAccounts')),
-          getDoc(doc(db, 'settings', 'exchangeRates')),
-        ]);
-        if (faqSnap.exists()) {
-          const d = faqSnap.data();
-          if (Array.isArray(d.faqList) && d.faqList.length > 0) setFaqEntries(d.faqList);
-          if (d.platformDesc) setPlatformDescription(d.platformDesc);
-        }
-        if (csrSnap.exists() && csrSnap.data().telegramLink) {
-          setCsrTelegramLink(csrSnap.data().telegramLink);
-        }
-        if (statsSnap.exists()) {
-          const d = statsSnap.data();
-          setPlatformStats((prev) => ({
-            membersCount: d.membersCount ?? prev.membersCount,
-            totalDeposits: d.totalDeposits ?? prev.totalDeposits,
-            totalWithdrawals: d.totalWithdrawals ?? prev.totalWithdrawals,
-          }));
-        }
-        if (accSnap.exists()) setDepositAccounts(accSnap.data() as DepositAccounts);
-        if (rateSnap.exists()) {
-          const d = rateSnap.data();
-          if (d.depositMMK) setDepositRateMMK(Number(d.depositMMK));
-          if (d.withdrawMMK) setWithdrawRateMMK(Number(d.withdrawMMK));
-        }
-      } catch {
-        // Use local defaults cleanly when offline or blocked
+      const settings = await loadPublicPlatformSettingsStatic();
+      setFaqEntries(settings.faqEntries);
+      setPlatformDescription(settings.platformDescription);
+      setCsrTelegramLink(settings.csrTelegramLink);
+      setPlatformStats(settings.platformStats);
+      setDepositAccounts(settings.depositAccounts);
+      setDepositRateMMK(settings.depositRateMMK);
+      setWithdrawRateMMK(settings.withdrawRateMMK);
+      if (settings.brandLogoUrl) {
+        setBrandLogoUrl(settings.brandLogoUrl);
       }
     };
     loadPublicSettings();
@@ -569,55 +394,37 @@ export default function App() {
       if (!opts?.force && pendingWalletDeltasRef.current > 0) return;
 
       try {
-        const res = await fetch('/api/wallet/sync', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) return;
-        const syncData = await res.json();
+        const activeUid = stateRef.current.user.uid;
+        const { member: syncData, activity } = await getMemberWalletSyncStatic(activeUid);
+        if (!syncData) return;
 
-        const srvReal =
-          typeof syncData.realBalance === 'number' ? Number(syncData.realBalance) : undefined;
-        const srvDemo =
-          typeof syncData.demoBalance === 'number' ? Number(syncData.demoBalance) : undefined;
+        const srvReal = Number(syncData.realBalance);
+        const srvDemo = Number(syncData.demoBalance);
 
         setUser((prev) => {
           const nextUser: UserProfile = {
             ...prev,
-            realBalance: srvReal !== undefined ? srvReal : prev.realBalance,
-            demoBalance: srvDemo !== undefined ? srvDemo : prev.demoBalance,
+            realBalance: Number.isFinite(srvReal) ? srvReal : prev.realBalance,
+            demoBalance: Number.isFinite(srvDemo) ? srvDemo : prev.demoBalance,
             pin:
               typeof syncData.securityPin === 'string' && /^\d{4}$/.test(syncData.securityPin)
                 ? syncData.securityPin
                 : prev.pin,
-            hasDepositedBefore:
-              typeof syncData.hasDepositedBefore === 'boolean'
-                ? syncData.hasDepositedBefore
-                : prev.hasDepositedBefore,
-            hasTradedAfterDeposit:
-              typeof syncData.hasTradedAfterDeposit === 'boolean'
-                ? syncData.hasTradedAfterDeposit
-                : prev.hasTradedAfterDeposit,
-            withdrawLockClearedByAdmin:
-              typeof syncData.withdrawLockClearedByAdmin === 'boolean'
-                ? syncData.withdrawLockClearedByAdmin
-                : prev.withdrawLockClearedByAdmin,
-            isWithdrawBlocked:
-              typeof syncData.isWithdrawBlocked === 'boolean'
-                ? syncData.isWithdrawBlocked
-                : prev.isWithdrawBlocked,
-            isBlocked:
-              typeof syncData.isBlocked === 'boolean' ? syncData.isBlocked : prev.isBlocked,
+            hasDepositedBefore: Boolean(syncData.hasDepositedBefore),
+            hasTradedAfterDeposit: Boolean(syncData.hasTradedAfterDeposit),
+            withdrawLockClearedByAdmin: Boolean(syncData.withdrawLockClearedByAdmin),
+            isWithdrawBlocked: Boolean(syncData.isWithdrawBlocked),
+            isBlocked: Boolean(syncData.isBlocked),
           };
           stateRef.current.user = nextUser;
           return nextUser;
         });
 
-        // Keep logged-in user's own Firestore doc aligned with authoritative Cloud SQL balance
         if (
-          auth.currentUser &&
-          auth.currentUser.uid === stateRef.current.user.uid &&
-          srvReal !== undefined &&
-          srvDemo !== undefined
+          isFirebaseConfigured &&
+          db &&
+          auth?.currentUser &&
+          auth.currentUser.uid === activeUid
         ) {
           const prevSynced = lastFirestoreSyncedBalRef.current;
           if (
@@ -638,19 +445,8 @@ export default function App() {
           }
         }
 
-        if (Array.isArray(syncData.activity)) {
-          const activeUser = stateRef.current.user;
-          const serverRows = syncData.activity as ServerWalletActivityRow[];
-          const incomingTransfers = serverRows
-            .filter((a) => a.requestKind === 'transfer_in')
-            .map((a) => ({
-              id: `sql-${a.id}`,
-              amount: Number(a.amountUsd || 0),
-              target: a.target,
-              type: a.typeLabel,
-            }));
-
-          const newIncoming = incomingTransfers.filter(
+        if (Array.isArray(activity) && activity.length > 0) {
+          const newIncoming = activity.filter(
             (tx) =>
               tx.type.includes('RECEIVED') && !seenSqlTransferIdsRef.current.has(tx.id)
           );
@@ -659,20 +455,14 @@ export default function App() {
               showToast(`Received $${inc.amount.toFixed(2)} transfer (${inc.target})!`);
             }
           }
-          for (const row of serverRows) {
-            seenSqlTransferIdsRef.current.add(`sql-${row.id}`);
+          for (const row of activity) {
+            seenSqlTransferIdsRef.current.add(row.id);
           }
           initialWalletSyncDoneRef.current = true;
-
-          setWalletTransactions((prev) =>
-            mergeWalletTransactionsWithServerActivity(prev, serverRows, {
-              uid: activeUser.uid,
-              email: activeUser.email,
-            })
-          );
+          setWalletTransactions((prev) => deduplicateFirestoreAgainstSql(activity, prev));
         }
       } catch {
-        // Keep current state cleanly on transient network issues
+        // Keep current state cleanly
       }
     },
     [showToast]
@@ -690,41 +480,28 @@ export default function App() {
 
       pendingWalletDeltasRef.current += 1;
       try {
-        const res = await fetch('/api/wallet/delta', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ wallet, delta, markTradedAfterDeposit }),
+        const updated = await applyWalletDeltaStatic({
+          uid: stateRef.current.user.uid,
+          email: stateRef.current.user.email,
+          wallet,
+          delta,
+          markTradedAfterDeposit,
         });
-        if (!res.ok) return;
-        const data = await res.json();
+        if (!updated) return;
         setUser((prev) => {
           const nextUser: UserProfile = {
             ...prev,
-            realBalance:
-              typeof data.realBalance === 'number' ? data.realBalance : prev.realBalance,
-            demoBalance:
-              typeof data.demoBalance === 'number' ? data.demoBalance : prev.demoBalance,
-            hasDepositedBefore:
-              typeof data.hasDepositedBefore === 'boolean'
-                ? data.hasDepositedBefore
-                : prev.hasDepositedBefore,
-            hasTradedAfterDeposit:
-              typeof data.hasTradedAfterDeposit === 'boolean'
-                ? data.hasTradedAfterDeposit
-                : prev.hasTradedAfterDeposit,
-            withdrawLockClearedByAdmin:
-              typeof data.withdrawLockClearedByAdmin === 'boolean'
-                ? data.withdrawLockClearedByAdmin
-                : prev.withdrawLockClearedByAdmin,
+            realBalance: updated.realBalance,
+            demoBalance: updated.demoBalance,
+            hasDepositedBefore: Boolean(updated.hasDepositedBefore),
+            hasTradedAfterDeposit: Boolean(updated.hasTradedAfterDeposit),
+            withdrawLockClearedByAdmin: Boolean(updated.withdrawLockClearedByAdmin),
           };
           stateRef.current.user = nextUser;
           return nextUser;
         });
       } catch {
-        // Keep optimistic UI state on transient failure
+        // Keep optimistic UI state
       } finally {
         pendingWalletDeltasRef.current = Math.max(0, pendingWalletDeltasRef.current - 1);
       }
@@ -754,166 +531,156 @@ export default function App() {
         setAuthToken(idToken);
         authTokenRef.current = idToken;
 
-        let syncedRole: UserRole = 'user';
-        let syncedServerUser: Record<string, unknown> | null = null;
-        try {
-          const sessionRes = await fetch('/api/auth/session', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${idToken}`,
-            },
-            body: JSON.stringify({ username: fbUser.displayName || fbUser.email?.split('@')[0] }),
-          });
-          if (sessionRes.ok) {
-            const sessionData = await sessionRes.json();
-            if (sessionData?.user) {
-              syncedServerUser = sessionData.user as Record<string, unknown>;
-              if (sessionData.user.role) {
-                syncedRole = sessionData.user.role as UserRole;
-              }
-            }
+        const syncedMember = await syncMemberOnAuthStatic({
+          uid: fbUser.uid,
+          email: fbUser.email || '',
+          username: fbUser.displayName || undefined,
+        });
+
+        let data: Record<string, unknown> = {};
+        if (isFirebaseConfigured && db) {
+          try {
+            const snap = await getDoc(doc(db, 'users', fbUser.uid));
+            if (snap.exists()) data = snap.data();
+          } catch {
+            // Use synced local profile when offline
           }
-        } catch {
-          // Graceful fallback if offline
         }
 
-        const userRef = doc(db, 'users', fbUser.uid);
-        const snap = await getDoc(userRef);
-        const data = snap.exists() ? snap.data() : {};
-        if (data.isBlocked || syncedServerUser?.isBlocked) {
-          await signOut(auth).catch(() => {});
-          await signOut(oauthAuth).catch(() => {});
+        if (data.isBlocked || syncedMember.isBlocked) {
+          if (auth) await signOut(auth).catch(() => {});
+          if (oauthAuth) await signOut(oauthAuth).catch(() => {});
           setAuthToken(null);
           showToast('Your account is currently restricted. Please contact support.', 'error');
           return;
         }
 
         const effectiveRole = (
-          syncedRole === 'admin' || data.role === 'admin'
+          syncedMember.role === 'admin' || data.role === 'admin'
             ? 'admin'
-            : (syncedRole || (data.role as UserRole) || 'user')
+            : (syncedMember.role || (data.role as UserRole) || 'user')
         ) as UserRole;
 
-        const initialReal = Number(
-          syncedServerUser?.realBalance ?? data.realBalance ?? FIRST_REGISTER_REAL_BONUS_USD
-        );
-        const initialDemo = Number(syncedServerUser?.demoBalance ?? data.demoBalance ?? 100000);
+        const initialReal = Number(data.realBalance ?? syncedMember.realBalance ?? FIRST_REGISTER_REAL_BONUS_USD);
+        const initialDemo = Number(data.demoBalance ?? syncedMember.demoBalance ?? 100000);
 
         setUser({
           uid: fbUser.uid,
           isLoggedIn: true,
           isLocalDemoSession: false,
           username: String(
-            syncedServerUser?.username || data.username || fbUser.displayName || fbUser.email?.split('@')[0] || 'Trader'
+            data.username || syncedMember.username || fbUser.displayName || fbUser.email?.split('@')[0] || 'Trader'
           ),
-          email: String(syncedServerUser?.email || fbUser.email || ''),
-          pin: String(syncedServerUser?.securityPin || data.securityPin || '1234'),
+          email: String(data.email || fbUser.email || syncedMember.email || ''),
+          pin: String(data.securityPin || syncedMember.securityPin || '1234'),
           role: effectiveRole,
-          isBlocked: !!(syncedServerUser?.isBlocked ?? data.isBlocked),
-          isWithdrawBlocked: !!(syncedServerUser?.isWithdrawBlocked ?? data.isWithdrawBlocked),
-          invitedBy: data.invitedBy || null,
-          hasDepositedBefore: !!(syncedServerUser?.hasDepositedBefore ?? data.hasDepositedBefore),
-          hasTradedAfterDeposit: !!(syncedServerUser?.hasTradedAfterDeposit ?? data.hasTradedAfterDeposit),
-          withdrawLockClearedByAdmin: !!(syncedServerUser?.withdrawLockClearedByAdmin ?? data.withdrawLockClearedByAdmin),
+          isBlocked: Boolean(data.isBlocked ?? syncedMember.isBlocked),
+          isWithdrawBlocked: Boolean(data.isWithdrawBlocked ?? syncedMember.isWithdrawBlocked),
+          invitedBy: (data.invitedBy as string | null | undefined) ?? syncedMember.invitedBy ?? null,
+          hasDepositedBefore: Boolean(data.hasDepositedBefore ?? syncedMember.hasDepositedBefore),
+          hasTradedAfterDeposit: Boolean(data.hasTradedAfterDeposit ?? syncedMember.hasTradedAfterDeposit),
+          withdrawLockClearedByAdmin: Boolean(
+            data.withdrawLockClearedByAdmin ?? syncedMember.withdrawLockClearedByAdmin
+          ),
           demoBalance: initialDemo,
           realBalance: initialReal,
-          spotHoldings: data.spotHoldings || {},
-          avatarUrl: (syncedServerUser?.avatarUrl as string | null | undefined) ?? data.avatarUrl ?? null,
-          fullName: (syncedServerUser?.fullName as string | null | undefined) ?? data.fullName ?? null,
-          phone: (syncedServerUser?.phone as string | null | undefined) ?? data.phone ?? null,
-          country: (syncedServerUser?.country as string | null | undefined) ?? data.country ?? null,
-          bio: (syncedServerUser?.bio as string | null | undefined) ?? data.bio ?? null,
-          withdrawMethod: ((syncedServerUser?.withdrawMethod || data.withdrawMethod || 'kpay') as WithdrawMethod),
+          spotHoldings: (data.spotHoldings as UserProfile['spotHoldings']) || {},
+          avatarUrl: (data.avatarUrl as string | null | undefined) ?? syncedMember.avatarUrl ?? null,
+          fullName: (data.fullName as string | null | undefined) ?? syncedMember.fullName ?? null,
+          phone: (data.phone as string | null | undefined) ?? syncedMember.phone ?? null,
+          country: (data.country as string | null | undefined) ?? syncedMember.country ?? null,
+          bio: (data.bio as string | null | undefined) ?? syncedMember.bio ?? null,
+          withdrawMethod: ((data.withdrawMethod || syncedMember.withdrawMethod || 'kpay') as WithdrawMethod),
           withdrawAccountName:
-            (syncedServerUser?.withdrawAccountName as string | null | undefined) ?? data.withdrawAccountName ?? null,
+            (data.withdrawAccountName as string | null | undefined) ??
+            syncedMember.withdrawAccountName ??
+            null,
           withdrawAccountNumber:
-            (syncedServerUser?.withdrawAccountNumber as string | null | undefined) ?? data.withdrawAccountNumber ?? null,
+            (data.withdrawAccountNumber as string | null | undefined) ??
+            syncedMember.withdrawAccountNumber ??
+            null,
         });
 
-        // Heal stale Firestore balance/eligibility fields from authoritative Cloud SQL on login
-        if (syncedServerUser) {
-          lastFirestoreSyncedBalRef.current = {
-            uid: fbUser.uid,
-            real: initialReal,
-            demo: initialDemo,
-          };
-          if (
-            Number(data.realBalance ?? 0) !== initialReal ||
-            Number(data.demoBalance ?? 100000) !== initialDemo
-          ) {
-            updateDoc(userRef, {
-              realBalance: initialReal,
-              demoBalance: initialDemo,
-            }).catch(() => {});
-          }
+        if (isFirebaseConfigured && db) {
+          const userRef = doc(db, 'users', fbUser.uid);
+          unsubUser = onSnapshot(userRef, (dSnap) => {
+            if (!dSnap.exists()) return;
+            const d = dSnap.data();
+            setUser((prev) => ({
+              ...prev,
+              username: d.username ?? prev.username,
+              role: (d.role as UserRole) || prev.role,
+              realBalance: typeof d.realBalance === 'number' ? d.realBalance : prev.realBalance,
+              demoBalance: typeof d.demoBalance === 'number' ? d.demoBalance : prev.demoBalance,
+              hasDepositedBefore:
+                typeof d.hasDepositedBefore === 'boolean' ? d.hasDepositedBefore : prev.hasDepositedBefore,
+              hasTradedAfterDeposit:
+                typeof d.hasTradedAfterDeposit === 'boolean'
+                  ? d.hasTradedAfterDeposit
+                  : prev.hasTradedAfterDeposit,
+              withdrawLockClearedByAdmin:
+                typeof d.withdrawLockClearedByAdmin === 'boolean'
+                  ? d.withdrawLockClearedByAdmin
+                  : prev.withdrawLockClearedByAdmin,
+              isWithdrawBlocked:
+                typeof d.isWithdrawBlocked === 'boolean' ? d.isWithdrawBlocked : prev.isWithdrawBlocked,
+              spotHoldings: d.spotHoldings || {},
+              avatarUrl: d.avatarUrl !== undefined ? d.avatarUrl : prev.avatarUrl,
+              fullName: d.fullName !== undefined ? d.fullName : prev.fullName,
+              phone: d.phone !== undefined ? d.phone : prev.phone,
+              country: d.country !== undefined ? d.country : prev.country,
+              bio: d.bio !== undefined ? d.bio : prev.bio,
+              withdrawMethod: (d.withdrawMethod as WithdrawMethod | undefined) ?? prev.withdrawMethod,
+              withdrawAccountName:
+                d.withdrawAccountName !== undefined ? d.withdrawAccountName : prev.withdrawAccountName,
+              withdrawAccountNumber:
+                d.withdrawAccountNumber !== undefined ? d.withdrawAccountNumber : prev.withdrawAccountNumber,
+            }));
+          });
+
+          unsubPos = onSnapshot(collection(db, 'users', fbUser.uid, 'positions'), (qSnap) => {
+            setActivePositions(
+              qSnap.docs
+                .filter((d) => !settledIdsRef.current.has(d.id))
+                .map((d) => ({ id: d.id, ...d.data() } as Position))
+            );
+          });
+
+          unsubOrd = onSnapshot(collection(db, 'users', fbUser.uid, 'orders'), (qSnap) => {
+            setPreOrders(qSnap.docs.map((d) => ({ id: d.id, ...d.data() } as PreOrder)));
+          });
+
+          unsubTx = onSnapshot(collection(db, 'users', fbUser.uid, 'transactions'), (qSnap) => {
+            const list: WalletTransaction[] = qSnap.docs.map((d) => {
+              const raw = d.data();
+              const dt = raw.createdAt?.toDate ? raw.createdAt.toDate() : new Date();
+              return {
+                id: d.id,
+                type: raw.type || 'TX',
+                amount: Number(raw.amount || 0),
+                target: raw.target || 'System Wallet',
+                isAdjustment: Boolean(raw.isAdjustment),
+                status: raw.status || 'PENDING',
+                rejectReason: raw.rejectReason || null,
+                rawTime: dt.getTime(),
+                timestamp: dt.toLocaleString(),
+              };
+            });
+            setWalletTransactions((prev) => {
+              const localMerged = prev.filter((t) => t.id.startsWith('adj-') || t.id.startsWith('ref-') || t.id.startsWith('p2p-'));
+              return deduplicateFirestoreAgainstSql(localMerged, list);
+            });
+          });
         }
 
-        unsubUser = onSnapshot(userRef, (dSnap) => {
-          if (!dSnap.exists()) return;
-          const d = dSnap.data();
-          // Keep profile/holdings synced without overwriting authoritative Cloud SQL balances or withdraw lock state
-          setUser((prev) => ({
-            ...prev,
-            username: d.username ?? prev.username,
-            role: (d.role as UserRole) || prev.role,
-            spotHoldings: d.spotHoldings || {},
-            avatarUrl: d.avatarUrl !== undefined ? d.avatarUrl : prev.avatarUrl,
-            fullName: d.fullName !== undefined ? d.fullName : prev.fullName,
-            phone: d.phone !== undefined ? d.phone : prev.phone,
-            country: d.country !== undefined ? d.country : prev.country,
-            bio: d.bio !== undefined ? d.bio : prev.bio,
-            withdrawMethod: (d.withdrawMethod as WithdrawMethod | undefined) ?? prev.withdrawMethod,
-            withdrawAccountName:
-              d.withdrawAccountName !== undefined ? d.withdrawAccountName : prev.withdrawAccountName,
-            withdrawAccountNumber:
-              d.withdrawAccountNumber !== undefined ? d.withdrawAccountNumber : prev.withdrawAccountNumber,
-          }));
-        });
-
-        unsubPos = onSnapshot(collection(db, 'users', fbUser.uid, 'positions'), (qSnap) => {
-          setActivePositions(
-            qSnap.docs
-              .filter((d) => !settledIdsRef.current.has(d.id))
-              .map((d) => ({ id: d.id, ...d.data() } as Position))
-          );
-        });
-
-        unsubOrd = onSnapshot(collection(db, 'users', fbUser.uid, 'orders'), (qSnap) => {
-          setPreOrders(qSnap.docs.map((d) => ({ id: d.id, ...d.data() } as PreOrder)));
-        });
-
-        unsubTx = onSnapshot(collection(db, 'users', fbUser.uid, 'transactions'), (qSnap) => {
-          const list: WalletTransaction[] = qSnap.docs.map((d) => {
-            const raw = d.data();
-            const dt = raw.createdAt?.toDate ? raw.createdAt.toDate() : new Date();
-            return {
-              id: d.id,
-              type: raw.type || 'TX',
-              amount: Number(raw.amount || 0),
-              target: raw.target || 'System Wallet',
-              isAdjustment: Boolean(raw.isAdjustment),
-              status: raw.status || 'PENDING',
-              rejectReason: raw.rejectReason || null,
-              rawTime: dt.getTime(),
-              timestamp: dt.toLocaleString(),
-            };
-          });
-          setWalletTransactions((prev) => {
-            const sqlEntries = prev.filter((t) => t.id.startsWith('sql-'));
-            return deduplicateFirestoreAgainstSql(sqlEntries, list);
-          });
-        });
-
-        // Immediately sync wallet balance + Cloud SQL transfer history
         await syncWalletFromServer({ tokenOverride: idToken, force: true, silent: true });
       } catch {
         // Ignore Firestore read errors gracefully
       }
     };
 
-    const unsubAuth = onAuthStateChanged(auth, handleFirebaseUser);
-    const unsubOAuth = onAuthStateChanged(oauthAuth, handleFirebaseUser);
+    const unsubAuth = auth ? onAuthStateChanged(auth, handleFirebaseUser) : () => {};
+    const unsubOAuth = oauthAuth && oauthAuth !== auth ? onAuthStateChanged(oauthAuth, handleFirebaseUser) : () => {};
 
     return () => {
       unsubAuth();
@@ -1045,33 +812,19 @@ export default function App() {
     };
   }, []);
 
-  // Poll Admin-managed Custom Coins (e.g., XU/USDT) live from Cloud SQL server
+  // Sync Admin-managed Custom Coins (e.g., XU/USDT) live via Firestore + localStorage
   useEffect(() => {
     let cancelled = false;
     const syncCustomCoins = async () => {
       try {
-        const res = await fetch('/api/coins');
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
-        const serverCoins = Array.isArray(data?.coins) ? (data.coins as AdminManagedCoin[]) : [];
-        const customQuotes: MarketQuote[] = serverCoins.map((c) => ({
-          symbol: c.symbol,
-          tvSymbol: `CUSTOM:${c.symbol}`,
-          label: c.label,
-          shortName: c.shortName,
-          price: Number(c.currentPrice),
-          changePct: Number(c.changePct),
-          high24h: Number(c.high24h),
-          low24h: Number(c.low24h),
-          isCustom: true,
-        }));
+        const coins = await syncAndListCustomCoinsStatic(false);
+        if (cancelled) return;
         setQuotes((prev) => {
           const builtIn = prev.filter((q) => !q.isCustom);
-          if (builtIn.length === 0) return customQuotes;
-          return [builtIn[0], ...customQuotes, ...builtIn.slice(1)];
+          return mergeBuiltInAndCustomQuotes(builtIn, coins);
         });
       } catch {
-        // Ignore transient network errors
+        // Keep current quotes cleanly
       }
     };
 
@@ -1130,17 +883,11 @@ export default function App() {
       accountMode: AccountMode;
     }) => {
       const currentUser = stateRef.current.user;
-      fetch('/api/trades/record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...payload,
-          userUid: currentUser.uid,
-          userEmail: currentUser.email,
-        }),
-      }).catch(() => {
-        // Non-blocking telemetry sync
-      });
+      void recordCoinTradeStatic({
+        ...payload,
+        userUid: currentUser.uid,
+        userEmail: currentUser.email,
+      }).catch(() => {});
     },
     []
   );
@@ -1234,7 +981,7 @@ export default function App() {
           applyWalletDeltaOnServer(pos.accountMode, settlement.netReturnToWallet);
         }
 
-        if (!stateRef.current.user.isLocalDemoSession && auth.currentUser) {
+        if (!stateRef.current.user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
           try {
             const uid = auth.currentUser.uid;
             await deleteDoc(doc(db, 'users', uid, 'positions', id));
@@ -1294,7 +1041,7 @@ export default function App() {
           status: 'OPEN',
           accountMode: order.accountMode,
         });
-        if (!currentUser.isLocalDemoSession && auth.currentUser) {
+        if (!currentUser.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
           const uid = auth.currentUser.uid;
           deleteDoc(doc(db, 'users', uid, 'orders', order.id)).catch(() => {});
           setDoc(doc(db, 'users', uid, 'positions', order.id), filledPos).catch(() => {});
@@ -1398,12 +1145,8 @@ export default function App() {
     async (tokenOverride?: string | null) => {
       try {
         const activeToken = tokenOverride !== undefined ? tokenOverride : authToken;
-        const url = `/api/lottery/state?userUid=${encodeURIComponent(user.uid)}`;
-        const res = await fetch(url, {
-          headers: activeToken ? { Authorization: `Bearer ${activeToken}` } : undefined,
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as LotteryLiveState;
+        const isAdminAccess = user.role === 'admin' || Boolean(activeToken);
+        const data = await tickAndGetLotteryStateStatic(user.uid, isAdminAccess);
         setLotteryState(data);
 
         // Reconcile newly settled live bets once per bet ID
@@ -1534,7 +1277,7 @@ export default function App() {
           setUser((prev) => {
             const nextDemo = Number((prev.demoBalance + totalDemoCredit).toFixed(2));
             const nextReal = Number((prev.realBalance + totalRealCredit).toFixed(2));
-            if (!prev.isLocalDemoSession && auth.currentUser) {
+            if (!prev.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
               updateDoc(doc(db, 'users', prev.uid), {
                 demoBalance: nextDemo,
                 realBalance: nextReal,
@@ -1551,7 +1294,7 @@ export default function App() {
         // Keep UI responsive
       }
     },
-    [authToken, user.uid, showToast, applyWalletDeltaOnServer]
+        [authToken, user.uid, user.role, showToast, applyWalletDeltaOnServer]
   );
 
   useEffect(() => {
@@ -1566,12 +1309,8 @@ export default function App() {
   const fetchPublicNews = useCallback(async () => {
     setNewsLoading(true);
     try {
-      const res = await fetch('/api/news');
-      if (!res.ok) return;
-      const data = await res.json();
-      if (Array.isArray(data?.articles)) {
-        setNewsArticles(data.articles as NewsArticle[]);
-      }
+      const list = await listNewsArticlesStatic(false);
+      setNewsArticles(list);
     } catch {
       // keep existing articles cleanly
     } finally {
@@ -1592,17 +1331,11 @@ export default function App() {
   const fetchAdminNews = useCallback(
     async (tokenOverride?: string | null) => {
       const activeToken = tokenOverride ?? authToken;
-      if (!activeToken) return;
+      if (!activeToken && stateRef.current.user.role !== 'admin') return;
       setAdminNewsLoading(true);
       try {
-        const res = await fetch('/api/admin/news', {
-          headers: { Authorization: `Bearer ${activeToken}` },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (Array.isArray(data?.articles)) {
-          setAdminNewsArticles(data.articles as NewsArticle[]);
-        }
+        const list = await listNewsArticlesStatic(true);
+        setAdminNewsArticles(list);
       } catch {
         // ignore cleanly
       } finally {
@@ -1623,33 +1356,21 @@ export default function App() {
       isFeatured: boolean;
       isPublished: boolean;
     }): Promise<boolean> => {
-      if (!authToken) {
+      if (!authToken && user.role !== 'admin') {
         showToast('Admin authentication required to publish dispatches.', 'error');
         return false;
       }
-      try {
-        const res = await fetch('/api/admin/news', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Unable to publish news dispatch.', 'error');
-          return false;
-        }
-        await Promise.all([fetchAdminNews(authToken), fetchPublicNews()]);
-        showToast('News dispatch published.');
-        return true;
-      } catch {
-        showToast('Network error publishing news dispatch.', 'error');
+      const res = await createNewsArticleStatic(payload);
+      if (!res.ok) {
+        showToast(res.error || 'Unable to publish news dispatch.', 'error');
         return false;
       }
+      setAdminNewsArticles(res.articles);
+      setNewsArticles(res.articles.filter((a) => a.isPublished));
+      showToast('News dispatch published.');
+      return true;
     },
-    [authToken, fetchAdminNews, fetchPublicNews, showToast]
+    [authToken, user.role, showToast]
   );
 
   const handleUpdateAdminNews = useCallback(
@@ -1666,250 +1387,70 @@ export default function App() {
         isPublished: boolean;
       }>
     ): Promise<boolean> => {
-      if (!authToken) {
+      if (!authToken && user.role !== 'admin') {
         showToast('Admin authentication required.', 'error');
         return false;
       }
-      try {
-        const res = await fetch(`/api/admin/news/${id}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(updates),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Unable to update news dispatch.', 'error');
-          return false;
-        }
-        await Promise.all([fetchAdminNews(authToken), fetchPublicNews()]);
-        showToast('News dispatch updated.');
-        return true;
-      } catch {
-        showToast('Network error updating news dispatch.', 'error');
+      const res = await updateNewsArticleStatic(id, updates);
+      if (!res.ok) {
+        showToast(res.error || 'Unable to update news dispatch.', 'error');
         return false;
       }
+      setAdminNewsArticles(res.articles);
+      setNewsArticles(res.articles.filter((a) => a.isPublished));
+      showToast('News dispatch updated.');
+      return true;
     },
-    [authToken, fetchAdminNews, fetchPublicNews, showToast]
+    [authToken, user.role, showToast]
   );
 
   const handleDeleteAdminNews = useCallback(
     async (id: number): Promise<boolean> => {
-      if (!authToken) {
+      if (!authToken && user.role !== 'admin') {
         showToast('Admin authentication required.', 'error');
         return false;
       }
-      try {
-        const res = await fetch(`/api/admin/news/${id}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Unable to delete news dispatch.', 'error');
-          return false;
-        }
-        await Promise.all([fetchAdminNews(authToken), fetchPublicNews()]);
-        showToast('News dispatch deleted.');
-        return true;
-      } catch {
-        showToast('Network error deleting news dispatch.', 'error');
+      const res = await deleteNewsArticleStatic(id);
+      if (!res.ok) {
+        showToast(res.error || 'Unable to delete news dispatch.', 'error');
         return false;
       }
+      setAdminNewsArticles(res.articles);
+      setNewsArticles(res.articles.filter((a) => a.isPublished));
+      showToast('News dispatch deleted.');
+      return true;
     },
-    [authToken, fetchAdminNews, fetchPublicNews, showToast]
+    [authToken, user.role, showToast]
   );
 
-  const fetchAdminMembersFromServer = useCallback(async (tokenOverride?: string, queryText = '') => {
-    const activeToken = tokenOverride ?? authToken;
-    if (!activeToken) return;
+  const fetchAdminMembersFromServer = useCallback(async (_tokenOverride?: string, queryText = '') => {
     try {
-      const url = queryText
-        ? `/api/admin/members?q=${encodeURIComponent(queryText)}`
-        : '/api/admin/members';
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${activeToken}` },
-      });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (Array.isArray(data?.members)) {
-        setManagedMembers(
-          data.members.map((m: Record<string, unknown>) => ({
-            uid: String(m.uid || ''),
-            username: String(m.username || 'Trader'),
-            email: String(m.email || ''),
-            role: (m.role as UserRole) || 'user',
-            isBlocked: Boolean(m.isBlocked),
-            isWithdrawBlocked: Boolean(m.isWithdrawBlocked),
-            hasDepositedBefore: Boolean(m.hasDepositedBefore),
-            hasTradedAfterDeposit: Boolean(m.hasTradedAfterDeposit),
-            withdrawLockClearedByAdmin: Boolean(m.withdrawLockClearedByAdmin),
-            realBalance: Number(m.realBalance ?? 0),
-            demoBalance: Number(m.demoBalance ?? 100000),
-            securityPin: m.securityPin ? String(m.securityPin) : undefined,
-            invitedBy: m.invitedBy ? String(m.invitedBy) : null,
-            avatarUrl: m.avatarUrl ? String(m.avatarUrl) : null,
-            fullName: m.fullName ? String(m.fullName) : null,
-            phone: m.phone ? String(m.phone) : null,
-            country: m.country ? String(m.country) : null,
-            bio: m.bio ? String(m.bio) : null,
-            withdrawMethod: (m.withdrawMethod as WithdrawMethod | undefined) || 'kpay',
-            withdrawAccountName: m.withdrawAccountName ? String(m.withdrawAccountName) : null,
-            withdrawAccountNumber: m.withdrawAccountNumber ? String(m.withdrawAccountNumber) : null,
-          }))
-        );
-      }
+      const list = await listMembersStatic(queryText);
+      setManagedMembers(list);
     } catch {
-      // ignore fetch errors gracefully
+      // ignore cleanly
     }
-  }, [authToken]);
+  }, []);
 
   const loadStaffRequests = useCallback(
-    async (tokenOverride?: string) => {
+    async (_tokenOverride?: string) => {
       const role = stateRef.current.user.role;
       const isStaffRole = ['admin', 'staff', 'caiwu', 'chukuan'].includes(role);
       if (!isStaffRole) return;
 
-      const activeToken = tokenOverride ?? authToken;
       const canSeeDeposits = role === 'admin' || role === 'staff' || role === 'caiwu';
       const canSeeWithdrawals = role === 'admin' || role === 'staff' || role === 'chukuan';
 
       setStaffRequestsLoading(true);
       try {
-        const depositsList: StaffWalletRequest[] = [];
-        const withdrawalsList: StaffWalletRequest[] = [];
-        const seenKeys = new Set<string>();
+        const { deposits, withdrawals } = await listStaffRequestsStatic(role);
+        const depositsList = [...deposits];
+        const withdrawalsList = [...withdrawals];
+        const seenKeys = new Set<string>([
+          ...depositsList.map((d) => `dep|${d.userId}|${d.amount}|${d.target}`),
+          ...withdrawalsList.map((w) => `wd|${w.userId}|${w.amount}|${w.target}`),
+        ]);
 
-        if (activeToken) {
-          try {
-            const res = await fetch('/api/staff/requests', {
-              headers: { Authorization: `Bearer ${activeToken}` },
-            });
-            if (res.ok) {
-              const data = await res.json();
-              if (canSeeDeposits && Array.isArray(data?.deposits)) {
-                for (const d of data.deposits as Array<Record<string, unknown>>) {
-                  const idStr = `srv-${String(d.id)}`;
-                  const dt = d.createdAt ? new Date(String(d.createdAt)) : new Date();
-                  depositsList.push({
-                    id: idStr,
-                    serverId: Number(d.id),
-                    source: 'server',
-                    userId: String(d.userUid || ''),
-                    userEmail: String(d.userEmail || ''),
-                    kind: 'deposit',
-                    type: String(d.typeLabel || 'DEPOSIT SUBMITTED'),
-                    method: String(d.method || 'kpay'),
-                    amount: Number(d.amountUsd || 0),
-                    target: String(d.target || ''),
-                    status: String(d.status || 'PENDING'),
-                    rejectReason: d.rejectReason ? String(d.rejectReason) : null,
-                    createdAtLabel: Number.isNaN(dt.getTime()) ? 'Just now' : dt.toLocaleString(),
-                  });
-                  seenKeys.add(`dep|${String(d.userUid)}|${Number(d.amountUsd || 0)}|${String(d.target || '')}`);
-                }
-              }
-              if (canSeeWithdrawals && Array.isArray(data?.withdrawals)) {
-                for (const w of data.withdrawals as Array<Record<string, unknown>>) {
-                  const idStr = `srv-${String(w.id)}`;
-                  const dt = w.createdAt ? new Date(String(w.createdAt)) : new Date();
-                  withdrawalsList.push({
-                    id: idStr,
-                    serverId: Number(w.id),
-                    source: 'server',
-                    userId: String(w.userUid || ''),
-                    userEmail: String(w.userEmail || ''),
-                    kind: 'withdrawal',
-                    type: String(w.typeLabel || 'WITHDRAWAL'),
-                    method: String(w.method || 'kpay'),
-                    amount: Number(w.amountUsd || 0),
-                    target: String(w.target || ''),
-                    status: String(w.status || 'PENDING'),
-                    rejectReason: w.rejectReason ? String(w.rejectReason) : null,
-                    createdAtLabel: Number.isNaN(dt.getTime()) ? 'Just now' : dt.toLocaleString(),
-                  });
-                  seenKeys.add(`wd|${String(w.userUid)}|${Number(w.amountUsd || 0)}|${String(w.target || '')}`);
-                }
-              }
-            }
-          } catch {
-            // graceful fallback
-          }
-        }
-
-        // Safely merge Firestore pending transactions if permitted (silently ignore cross-user rule errors)
-        if (!stateRef.current.user.isLocalDemoSession && auth.currentUser) {
-          try {
-            const usersSnap = await getDocs(collection(db, 'users'));
-            for (const userDoc of usersSnap.docs) {
-              try {
-                const txSnap = await getDocs(
-                  query(
-                    collection(db, 'users', userDoc.id, 'transactions'),
-                    where('status', '==', 'PENDING')
-                  )
-                );
-                txSnap.forEach((txDoc) => {
-                  const raw = txDoc.data();
-                  const txType = String(raw.type || '');
-                  const amount = Number(raw.amount || 0);
-                  const target = String(raw.target || '');
-                  const dt = raw.createdAt?.toDate ? raw.createdAt.toDate() : new Date();
-                  const uid = String(raw.userId || userDoc.id);
-                  const email = String(raw.userEmail || userDoc.data().email || 'Unknown');
-
-                  if (canSeeDeposits && txType.includes('DEPOSIT')) {
-                    const dedup = `dep|${uid}|${amount}|${target}`;
-                    if (!seenKeys.has(dedup)) {
-                      seenKeys.add(dedup);
-                      depositsList.push({
-                        id: `fs-${txDoc.id}`,
-                        source: 'firestore',
-                        firestorePath: txDoc.ref.path,
-                        userId: uid,
-                        userEmail: email,
-                        kind: 'deposit',
-                        type: txType,
-                        method: txType,
-                        amount,
-                        target,
-                        status: 'PENDING',
-                        createdAtLabel: dt.toLocaleString(),
-                      });
-                    }
-                  } else if (canSeeWithdrawals && txType.includes('WITHDRAWAL')) {
-                    const dedup = `wd|${uid}|${amount}|${target}`;
-                    if (!seenKeys.has(dedup)) {
-                      seenKeys.add(dedup);
-                      withdrawalsList.push({
-                        id: `fs-${txDoc.id}`,
-                        source: 'firestore',
-                        firestorePath: txDoc.ref.path,
-                        userId: uid,
-                        userEmail: email,
-                        kind: 'withdrawal',
-                        type: txType,
-                        method: txType,
-                        amount,
-                        target,
-                        status: 'PENDING',
-                        createdAtLabel: dt.toLocaleString(),
-                      });
-                    }
-                  }
-                });
-              } catch {
-                // Skip restricted user subcollections silently without surfacing permission errors
-              }
-            }
-          } catch {
-            // Firestore cross-user directory restricted by rules — rely on Cloud SQL backend cleanly
-          }
-        }
-
-        // Also include any pending local session transactions not yet synced
         for (const tx of walletTransactions) {
           if (tx.status !== 'PENDING') continue;
           const uid = tx.userId || stateRef.current.user.uid;
@@ -1959,73 +1500,40 @@ export default function App() {
         setStaffRequestsLoading(false);
       }
     },
-    [authToken, walletTransactions]
+    [walletTransactions]
   );
 
-  const fetchAdminCoins = useCallback(
-    async (tokenOverride?: string) => {
-      const activeToken = tokenOverride ?? authToken;
-      if (!activeToken || stateRef.current.user.role !== 'admin') return;
-      try {
-        const res = await fetch('/api/admin/coins', {
-          headers: { Authorization: `Bearer ${activeToken}` },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (Array.isArray(data?.coins)) {
-          setAdminCoins(data.coins as AdminManagedCoin[]);
-        }
-      } catch {
-        // Ignore transient network errors
-      }
-    },
-    [authToken]
-  );
+  const fetchAdminCoins = useCallback(async (_tokenOverride?: string) => {
+    if (stateRef.current.user.role !== 'admin') return;
+    try {
+      const list = await syncAndListCustomCoinsStatic(true);
+      setAdminCoins(list);
+    } catch {
+      // Keep current coins cleanly
+    }
+  }, []);
 
-  const fetchCoinAnalytics = useCallback(
-    async (symbol: string, tokenOverride?: string) => {
-      const activeToken = tokenOverride ?? authToken;
-      if (!activeToken || stateRef.current.user.role !== 'admin' || !symbol) return;
-      setCoinAnalyticsLoading(true);
-      try {
-        const res = await fetch(`/api/admin/coins/${encodeURIComponent(symbol)}/analytics`, {
-          headers: { Authorization: `Bearer ${activeToken}` },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data?.analytics) {
-          setSelectedCoinAnalytics(data.analytics as CoinTradeAnalytics);
-        }
-      } catch {
-        // Ignore errors gracefully
-      } finally {
-        setCoinAnalyticsLoading(false);
-      }
-    },
-    [authToken]
-  );
+  const fetchCoinAnalytics = useCallback(async (symbol: string, _tokenOverride?: string) => {
+    if (stateRef.current.user.role !== 'admin' || !symbol) return;
+    setCoinAnalyticsLoading(true);
+    try {
+      const analytics = await getCoinTradeAnalyticsStatic(symbol);
+      setSelectedCoinAnalytics(analytics);
+    } catch {
+      // Ignore errors gracefully
+    } finally {
+      setCoinAnalyticsLoading(false);
+    }
+  }, []);
 
   const handleUpsertAdminCoin = useCallback(
     async (payload: { symbol: string; label?: string; initialPrice: number; enabled?: boolean }) => {
-      if (!authToken || user.role !== 'admin') {
+      if (user.role !== 'admin' && !authToken) {
         showToast('Only Full Admin can add custom coins.', 'error');
         return null;
       }
       try {
-        const res = await fetch('/api/admin/coins', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok || !data?.coin) {
-          showToast(data?.error || 'Failed to save custom coin.', 'error');
-          return null;
-        }
-        const saved = data.coin as AdminManagedCoin;
+        const saved = await upsertCustomCoinStatic(payload);
         setAdminCoins((prev) => {
           const exists = prev.some((c) => c.symbol === saved.symbol);
           return exists ? prev.map((c) => (c.symbol === saved.symbol ? saved : c)) : [saved, ...prev];
@@ -2049,8 +1557,8 @@ export default function App() {
         }
         showToast(`${saved.shortName} officially launched on Main Market at $${saved.currentPrice.toFixed(2)}.`);
         return saved;
-      } catch {
-        showToast('Network error saving custom coin.', 'error');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to save custom coin.', 'error');
         return null;
       }
     },
@@ -2076,25 +1584,16 @@ export default function App() {
         resetBaseline?: boolean;
       }
     ) => {
-      if (!authToken || user.role !== 'admin') {
+      if (user.role !== 'admin' && !authToken) {
         showToast('Only Full Admin can control coin prices.', 'error');
         return null;
       }
       try {
-        const res = await fetch(`/api/admin/coins/${encodeURIComponent(symbol)}/price-control`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok || !data?.coin) {
-          showToast(data?.error || 'Failed to update coin price schedule.', 'error');
+        const updated = await updateCoinPriceControlStatic(symbol, payload);
+        if (!updated) {
+          showToast('Custom coin not found.', 'error');
           return null;
         }
-        const updated = data.coin as AdminManagedCoin;
         setAdminCoins((prev) => prev.map((c) => (c.symbol === updated.symbol ? updated : c)));
         setQuotes((prev) => {
           if (!updated.enabled) return prev.filter((q) => q.symbol !== updated.symbol);
@@ -2136,8 +1635,8 @@ export default function App() {
             : `Updated ${updated.shortName} live control.`
         );
         return updated;
-      } catch {
-        showToast('Network error updating coin price schedule.', 'error');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to update coin price schedule.', 'error');
         return null;
       }
     },
@@ -2146,85 +1645,70 @@ export default function App() {
 
   const handleDeleteAdminCoin = useCallback(
     async (symbol: string): Promise<boolean> => {
-      if (!authToken || user.role !== 'admin') {
+      if (user.role !== 'admin' && !authToken) {
         showToast('Only Full Admin can delete custom coins.', 'error');
         return false;
       }
-      try {
-        const res = await fetch(`/api/admin/coins/${encodeURIComponent(symbol)}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Failed to delete coin.', 'error');
-          return false;
-        }
-        const cleanSym = symbol.toUpperCase().replace('/', '').trim();
-        setAdminCoins((prev) => prev.filter((c) => c.symbol !== cleanSym));
-        setQuotes((prev) => prev.filter((q) => q.symbol !== cleanSym));
-        if (selectedSymbol === cleanSym) {
-          setSelectedSymbol('BTCUSDT');
-        }
-        showToast(`Deleted ${cleanSym} from custom coins & Main Market.`);
-        return true;
-      } catch {
-        showToast('Network error deleting coin.', 'error');
+      const removed = await deleteCustomCoinStatic(symbol);
+      if (!removed) {
+        showToast('Custom coin not found.', 'error');
         return false;
       }
+      const cleanSym = symbol.toUpperCase().replace('/', '').trim();
+      setAdminCoins((prev) => prev.filter((c) => c.symbol !== cleanSym));
+      setQuotes((prev) => prev.filter((q) => q.symbol !== cleanSym));
+      if (selectedSymbol === cleanSym) {
+        setSelectedSymbol('BTCUSDT');
+      }
+      showToast(`Deleted ${cleanSym} from custom coins & Main Market.`);
+      return true;
     },
     [authToken, user.role, selectedSymbol, showToast]
   );
 
   const handleClaimCoinProfit = useCallback(
     async (symbol: string): Promise<boolean> => {
-      if (!authToken || user.role !== 'admin') {
+      if (user.role !== 'admin' && !authToken) {
         showToast('Only Full Admin can claim coin profit.', 'error');
         return false;
       }
-      try {
-        const res = await fetch(`/api/admin/coins/${encodeURIComponent(symbol)}/claim-profit`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Failed to claim profit.', 'error');
-          return false;
-        }
-        const claimedAmount = Number(data?.claimedAmount ?? 0);
-        if (claimedAmount <= 0) {
-          showToast('No unclaimed profit available to claim yet.', 'error');
-          return false;
-        }
-        const newBal = Number(data?.newAdminRealBalance ?? user.realBalance + claimedAmount);
-        setUser((prev) => ({ ...prev, realBalance: newBal }));
-        setManagedMembers((prev) =>
-          prev.map((m) => (m.uid === user.uid ? { ...m, realBalance: newBal } : m))
-        );
-        if (data?.analytics) {
-          setSelectedCoinAnalytics(data.analytics as CoinTradeAnalytics);
-        }
-        showToast(`Claimed $${claimedAmount.toFixed(2)} net profit to Admin Real Wallet!`);
-        return true;
-      } catch {
-        showToast('Network error claiming profit.', 'error');
+      const result = await claimAdminCoinProfitStatic({
+        symbol,
+        adminUid: user.uid,
+        adminEmail: user.email,
+      });
+      if (result.claimedAmount <= 0) {
+        showToast('No unclaimed profit available to claim yet.', 'error');
         return false;
       }
+      const updatedAdmin = await applyWalletDeltaStatic({
+        uid: user.uid,
+        email: user.email,
+        wallet: 'real',
+        delta: result.claimedAmount,
+      });
+      const newBal = updatedAdmin?.realBalance ?? Number((user.realBalance + result.claimedAmount).toFixed(2));
+      setUser((prev) => ({ ...prev, realBalance: newBal }));
+      setManagedMembers((prev) =>
+        prev.map((m) => (m.uid === user.uid ? { ...m, realBalance: newBal } : m))
+      );
+      setSelectedCoinAnalytics(result.analytics);
+      showToast(`Claimed $${result.claimedAmount.toFixed(2)} net profit to Admin Real Wallet!`);
+      return true;
     },
-    [authToken, user.role, user.uid, user.realBalance, showToast]
+    [authToken, user.role, user.uid, user.email, user.realBalance, showToast]
   );
 
   useEffect(() => {
-    if (user.isLoggedIn && authToken) {
+    if (user.isLoggedIn && (authToken || ['admin', 'staff', 'caiwu', 'chukuan'].includes(user.role))) {
       if (user.role === 'admin') {
-        fetchAdminCoins(authToken);
+        fetchAdminCoins(authToken ?? undefined);
       }
       if (['admin', 'staff', 'caiwu'].includes(user.role)) {
-        fetchAdminMembersFromServer(authToken);
+        fetchAdminMembersFromServer(authToken ?? undefined);
       }
       if (['admin', 'staff', 'caiwu', 'chukuan'].includes(user.role)) {
-        loadStaffRequests(authToken);
+        loadStaffRequests(authToken ?? undefined);
       }
     }
   }, [
@@ -2271,38 +1755,21 @@ export default function App() {
       }));
 
       try {
-        const res = await fetch('/api/lottery/bet', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-          },
-          body: JSON.stringify({
-            userUid: user.uid,
-            userEmail: user.email,
-            accountMode,
-            betType: payload.betType,
-            color: payload.color,
-            pickedNumber: payload.pickedNumber,
-            stake,
-          }),
+        const res = await placeLotteryBetStatic({
+          userUid: user.uid,
+          userEmail: user.email,
+          accountMode,
+          betType: payload.betType,
+          color: payload.color,
+          pickedNumber: payload.pickedNumber,
+          stake,
+          isAdmin: user.role === 'admin' || Boolean(authToken),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          setUser((prev) => ({
-            ...prev,
-            [balanceField]: Number((prev[balanceField] + stake).toFixed(2)),
-          }));
-          showToast(data?.error || 'Failed to confirm Lottery trade.', 'error');
-          return false;
-        }
-        if (data?.state) {
-          setLotteryState(data.state);
-        }
+        setLotteryState(res.state);
         if (!user.isLocalDemoSession) {
           applyWalletDeltaOnServer(accountMode, -stake);
         }
-        if (!user.isLocalDemoSession && auth.currentUser) {
+        if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
           const nextBal = Number(Math.max(0, activeBal - stake).toFixed(2));
           updateDoc(doc(db, 'users', user.uid), { [balanceField]: nextBal }).catch(() => {});
         }
@@ -2312,12 +1779,12 @@ export default function App() {
             : (payload.color ?? 'green').toUpperCase();
         showToast(`Confirmed ${label} trade · $${stake.toFixed(2)}.`);
         return true;
-      } catch {
+      } catch (err) {
         setUser((prev) => ({
           ...prev,
           [balanceField]: Number((prev[balanceField] + stake).toFixed(2)),
         }));
-        showToast('Network error confirming Lottery trade.', 'error');
+        showToast(err instanceof Error ? err.message : 'Failed to confirm Lottery trade.', 'error');
         return false;
       }
     },
@@ -2328,6 +1795,7 @@ export default function App() {
       user.realBalance,
       user.uid,
       user.email,
+      user.role,
       user.isLocalDemoSession,
       applyWalletDeltaOnServer,
       showToast,
@@ -2354,50 +1822,33 @@ export default function App() {
       }));
 
       try {
-        const res = await fetch('/api/lottery/digit-bet', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-          },
-          body: JSON.stringify({
-            userUid: user.uid,
-            userEmail: user.email,
-            accountMode,
-            drawUid: payload.drawUid,
-            pickedNumber: payload.pickedNumber,
-            stake,
-          }),
+        const res = await placeDigitLotteryBetStatic({
+          userUid: user.uid,
+          userEmail: user.email,
+          accountMode,
+          drawUid: payload.drawUid,
+          pickedNumber: payload.pickedNumber,
+          stake,
+          isAdmin: user.role === 'admin' || Boolean(authToken),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          setUser((prev) => ({
-            ...prev,
-            [balanceField]: Number((prev[balanceField] + stake).toFixed(2)),
-          }));
-          showToast(data?.error || 'Failed to place 2D/3D/6D ticket.', 'error');
-          return false;
-        }
-        if (data?.state) {
-          setLotteryState(data.state);
-        }
+        setLotteryState(res.state);
         if (!user.isLocalDemoSession) {
           applyWalletDeltaOnServer(accountMode, -stake);
         }
-        if (!user.isLocalDemoSession && auth.currentUser) {
+        if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
           const nextBal = Number(Math.max(0, activeBal - stake).toFixed(2));
           updateDoc(doc(db, 'users', user.uid), { [balanceField]: nextBal }).catch(() => {});
         }
         showToast(
-          `Confirmed ${data?.bet?.gameType ?? ''} Ticket #${data?.bet?.pickedNumber ?? payload.pickedNumber} · $${stake.toFixed(2)}`
+          `Confirmed ${res.bet.gameType} Ticket #${res.bet.pickedNumber} · $${stake.toFixed(2)}`
         );
         return true;
-      } catch {
+      } catch (err) {
         setUser((prev) => ({
           ...prev,
           [balanceField]: Number((prev[balanceField] + stake).toFixed(2)),
         }));
-        showToast('Network error placing 2D/3D/6D ticket.', 'error');
+        showToast(err instanceof Error ? err.message : 'Failed to place 2D/3D/6D ticket.', 'error');
         return false;
       }
     },
@@ -2408,6 +1859,7 @@ export default function App() {
       user.realBalance,
       user.uid,
       user.email,
+      user.role,
       user.isLocalDemoSession,
       applyWalletDeltaOnServer,
       showToast,
@@ -2416,26 +1868,17 @@ export default function App() {
 
   const handleUnlockLotteryAdmin = useCallback(
     async (email: string, password: string): Promise<boolean> => {
-      try {
-        const res = await fetch('/api/admin/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data?.token) {
-          showToast(data?.error || 'Invalid Admin credentials.', 'error');
-          return false;
-        }
-        setAuthToken(data.token);
-        fetchAdminMembersFromServer(data.token);
-        fetchLotteryState(data.token);
-        showToast('Lottery Admin Control Console unlocked.');
-        return true;
-      } catch {
-        showToast('Unable to verify Admin credentials.', 'error');
+      const res = await authenticateStaticAdmin(email, password);
+      if (!res.ok) {
+        showToast(res.error || 'Invalid Admin credentials.', 'error');
         return false;
       }
+      setAuthToken(res.token);
+      authTokenRef.current = res.token;
+      fetchAdminMembersFromServer(res.token);
+      fetchLotteryState(res.token);
+      showToast('Lottery Admin Control Console unlocked.');
+      return true;
     },
     [fetchAdminMembersFromServer, fetchLotteryState, showToast]
   );
@@ -2452,25 +1895,13 @@ export default function App() {
       isPaused?: boolean;
       settleNow?: boolean;
     }): Promise<boolean> => {
-      if (!authToken) {
+      if (!authToken && user.role !== 'admin') {
         showToast('Admin authentication required.', 'error');
         return false;
       }
       try {
-        const res = await fetch('/api/admin/lottery/config', {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Failed to update Lottery configuration.', 'error');
-          return false;
-        }
-        await fetchLotteryState(authToken);
+        const nextState = await updateLotteryAdminConfigStatic(payload, user.uid);
+        setLotteryState(nextState);
         if (typeof payload.forcedNumber === 'number') {
           showToast(`Next round outcome locked to #${payload.forcedNumber}.`);
         } else if (payload.forcedResult) {
@@ -2483,47 +1914,35 @@ export default function App() {
           showToast('Lottery Live configuration updated.');
         }
         return true;
-      } catch {
-        showToast('Network error updating Lottery configuration.', 'error');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to update Lottery configuration.', 'error');
         return false;
       }
     },
-    [authToken, fetchLotteryState, showToast]
+    [authToken, user.role, user.uid, showToast]
   );
 
   const handleScheduleDigitDraw = useCallback(
     async (payload: DigitDrawSchedulePayload): Promise<boolean> => {
-      if (!authToken) {
+      if (!authToken && user.role !== 'admin') {
         showToast('Admin authentication required.', 'error');
         return false;
       }
       try {
-        const res = await fetch('/api/admin/lottery/digit-draw', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Failed to update 2D/3D/6D schedule.', 'error');
-          return false;
-        }
-        setLotteryState(data);
+        const nextState = await adminScheduleDigitDrawStatic(payload, user.uid);
+        setLotteryState(nextState);
         if (payload.releaseNow) {
           showToast(`${payload.gameType} result released & settled.`);
         } else {
           showToast(`${payload.gameType} draw schedule saved.`);
         }
         return true;
-      } catch {
-        showToast('Network error updating 2D/3D/6D schedule.', 'error');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to update 2D/3D/6D schedule.', 'error');
         return false;
       }
     },
-    [authToken, showToast]
+    [authToken, user.role, user.uid, showToast]
   );
 
   // Handlers
@@ -2542,6 +1961,10 @@ export default function App() {
   };
 
   const handleGoogleSignIn = async () => {
+    if (!isOAuthFirebaseConfigured || !oauthAuth) {
+      showToast('Google Sign-In is unavailable without Firebase OAuth config. Use Email login or Launch Demo.', 'error');
+      return;
+    }
     try {
       await signInWithPopup(oauthAuth, googleAuthProvider);
       showToast('Signed in with Google.');
@@ -2565,6 +1988,10 @@ export default function App() {
 
     try {
       if (payload.mode === 'forgot') {
+        if (!isFirebaseConfigured || !auth) {
+          showToast('Password reset requires Firebase configuration.', 'error');
+          return;
+        }
         await sendPasswordResetEmail(auth, payload.email);
         showToast(`Password reset email sent to ${payload.email}.`);
         return;
@@ -2576,27 +2003,21 @@ export default function App() {
       }
 
       if (payload.mode === 'login' && payload.email.trim().toLowerCase() === 'admin@zectrade.io') {
-        const res = await fetch('/api/admin/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: payload.email,
-            password: payload.password,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data?.token || !data?.user) {
+        const res = await authenticateStaticAdmin(payload.email, payload.password);
+        if (!res.ok) {
           showToast('Invalid email or password.', 'error');
           return;
         }
-        setAuthToken(data.token);
+        const adminUser = res.user;
+        setAuthToken(res.token);
+        authTokenRef.current = res.token;
         setUser({
-          uid: data.user.uid,
+          uid: adminUser.uid,
           isLoggedIn: true,
           isLocalDemoSession: false,
-          username: data.user.username || 'Lead Admin',
-          email: data.user.email,
-          pin: data.user.securityPin || '8888',
+          username: adminUser.username || 'Lead Admin',
+          email: adminUser.email,
+          pin: adminUser.securityPin || '8888',
           role: 'admin',
           isBlocked: false,
           isWithdrawBlocked: false,
@@ -2604,26 +2025,30 @@ export default function App() {
           hasDepositedBefore: true,
           hasTradedAfterDeposit: true,
           withdrawLockClearedByAdmin: true,
-          demoBalance: Number(data.user.demoBalance ?? 100000),
-          realBalance: Number(data.user.realBalance ?? 25000),
+          demoBalance: Number(adminUser.demoBalance ?? 100000),
+          realBalance: Number(adminUser.realBalance ?? 25000),
           spotHoldings: {},
-          avatarUrl: data.user.avatarUrl ?? null,
-          fullName: data.user.fullName ?? null,
-          phone: data.user.phone ?? null,
-          country: data.user.country ?? null,
-          bio: data.user.bio ?? null,
-          withdrawMethod: (data.user.withdrawMethod as WithdrawMethod | undefined) || 'kpay',
-          withdrawAccountName: data.user.withdrawAccountName ?? null,
-          withdrawAccountNumber: data.user.withdrawAccountNumber ?? null,
+          avatarUrl: adminUser.avatarUrl ?? null,
+          fullName: adminUser.fullName ?? null,
+          phone: adminUser.phone ?? null,
+          country: adminUser.country ?? null,
+          bio: adminUser.bio ?? null,
+          withdrawMethod: (adminUser.withdrawMethod as WithdrawMethod | undefined) || 'kpay',
+          withdrawAccountName: adminUser.withdrawAccountName ?? null,
+          withdrawAccountNumber: adminUser.withdrawAccountNumber ?? null,
         });
-        authTokenRef.current = data.token;
         setActiveSection('lottery');
-        fetchLotteryState(data.token);
-        fetchAdminMembersFromServer(data.token);
-        fetchAdminCoins(data.token);
-        fetchAdminNews(data.token);
-        syncWalletFromServer({ tokenOverride: data.token, force: true, silent: true });
+        fetchLotteryState(res.token);
+        fetchAdminMembersFromServer(res.token);
+        fetchAdminCoins(res.token);
+        fetchAdminNews(res.token);
+        syncWalletFromServer({ tokenOverride: res.token, force: true, silent: true });
         showToast('Signed in successfully.');
+        return;
+      }
+
+      if (!isFirebaseConfigured || !auth || !db) {
+        showToast('Member email authentication requires Firebase config. Use Admin Sign-In or Launch Demo.', 'error');
         return;
       }
 
@@ -2789,7 +2214,7 @@ export default function App() {
       applyWalletDeltaOnServer(accountMode, -preview.totalRequired, tradedReal);
     }
 
-    if (!user.isLocalDemoSession && auth.currentUser) {
+    if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
       try {
         const uid = auth.currentUser.uid;
         await updateDoc(doc(db, 'users', uid), {
@@ -2820,7 +2245,7 @@ export default function App() {
       setActivePositions((prev) =>
         prev.map((p) => (p.id === id ? { ...p, stopLoss, takeProfit } : p))
       );
-      if (!stateRef.current.user.isLocalDemoSession && auth.currentUser) {
+      if (!stateRef.current.user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
         try {
           await updateDoc(doc(db, 'users', auth.currentUser.uid, 'positions', id), {
             stopLoss: stopLoss ?? null,
@@ -2879,7 +2304,7 @@ export default function App() {
     }));
     if (!user.isLocalDemoSession) {
       applyWalletDeltaOnServer(order.accountMode, refund);
-      if (auth.currentUser) {
+      if (isFirebaseConfigured && db && auth?.currentUser) {
         deleteDoc(doc(db, 'users', auth.currentUser.uid, 'orders', id)).catch(() => {});
       }
     }
@@ -2921,7 +2346,7 @@ export default function App() {
       if (!user.isLocalDemoSession) {
         applyWalletDeltaOnServer('real', -amount, true);
       }
-      if (!user.isLocalDemoSession && auth.currentUser) {
+      if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
         try {
           await updateDoc(doc(db, 'users', auth.currentUser.uid), {
             realBalance: user.realBalance - amount,
@@ -2953,7 +2378,7 @@ export default function App() {
       if (!user.isLocalDemoSession) {
         applyWalletDeltaOnServer('real', netOutput, true);
       }
-      if (!user.isLocalDemoSession && auth.currentUser) {
+      if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
         try {
           await updateDoc(doc(db, 'users', auth.currentUser.uid), {
             realBalance: user.realBalance + netOutput,
@@ -2994,39 +2419,26 @@ export default function App() {
       }));
     }
 
-    if (!isDemo && authToken) {
+    if (!isDemo) {
       try {
-        const reqRes = await fetch('/api/wallet/requests', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({
-            requestKind: 'deposit',
-            typeLabel: `DEPOSIT SUBMITTED (${method.toUpperCase()})`,
-            method,
-            amountUsd: usdAmount,
-            target: targetDesc,
-          }),
+        const created = await createWalletRequestStatic({
+          userUid: user.uid,
+          userEmail: user.email,
+          requestKind: 'deposit',
+          typeLabel: `DEPOSIT SUBMITTED (${method.toUpperCase()})`,
+          method,
+          amountUsd: usdAmount,
+          target: targetDesc,
         });
-        if (reqRes.ok) {
-          const reqData = await reqRes.json();
-          const createdId = reqData?.request?.id;
-          if (createdId) {
-            setWalletTransactions((prev) =>
-              prev.map((item) =>
-                item.id === tx.id ? { ...item, id: `sql-${createdId}` } : item
-              )
-            );
-          }
-        }
+        setWalletTransactions((prev) =>
+          prev.map((item) => (item.id === tx.id ? { ...item, id: created.id } : item))
+        );
       } catch {
-        // ignore network error
+        // ignore cleanly
       }
     }
 
-    if (!isDemo && auth.currentUser) {
+    if (!isDemo && isFirebaseConfigured && db && auth?.currentUser) {
       try {
         await addDoc(collection(db, 'users', auth.currentUser.uid, 'transactions'), {
           userId: auth.currentUser.uid,
@@ -3069,10 +2481,11 @@ export default function App() {
     }
     const nextReal = user.realBalance - usdAmount;
     const typeLabel = `WITHDRAWAL (${method.toUpperCase()})`;
+    const txId = Date.now().toString();
     setUser((prev) => ({ ...prev, realBalance: nextReal }));
     setWalletTransactions((prev) => [
       {
-        id: Date.now().toString(),
+        id: txId,
         userId: user.uid,
         userEmail: user.email,
         type: typeLabel,
@@ -3087,30 +2500,25 @@ export default function App() {
 
     if (!user.isLocalDemoSession) {
       applyWalletDeltaOnServer('real', -usdAmount);
-    }
-
-    if (!user.isLocalDemoSession && authToken) {
       try {
-        await fetch('/api/wallet/requests', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({
-            requestKind: 'withdrawal',
-            typeLabel,
-            method,
-            amountUsd: usdAmount,
-            target: targetDesc,
-          }),
+        const created = await createWalletRequestStatic({
+          userUid: user.uid,
+          userEmail: user.email,
+          requestKind: 'withdrawal',
+          typeLabel,
+          method,
+          amountUsd: usdAmount,
+          target: targetDesc,
         });
+        setWalletTransactions((prev) =>
+          prev.map((item) => (item.id === txId ? { ...item, id: created.id } : item))
+        );
       } catch {
-        // ignore network error
+        // ignore cleanly
       }
     }
 
-    if (!user.isLocalDemoSession && auth.currentUser) {
+    if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
       try {
         await updateDoc(doc(db, 'users', auth.currentUser.uid), {
           realBalance: nextReal,
@@ -3147,58 +2555,13 @@ export default function App() {
         return { ok: false, error: 'Cannot transfer to your own account.' };
       }
 
-      try {
-        const res = await fetch(
-          `/api/wallet/transfer/lookup?identifier=${encodeURIComponent(trimmed)}`
-        );
-        const data = await res.json().catch(() => ({}));
-        if (res.ok && data?.recipient) {
-          return { ok: true, recipient: data.recipient as VerifiedTransferRecipient };
-        }
-        if (res.status !== 404) {
-          return { ok: false, error: data?.error || "Account doesn't exist." };
-        }
-      } catch {
-        // Fallback to local/Firestore check below
+      const found = await lookupTransferRecipientStatic(trimmed);
+      if (found) {
+        return { ok: true, recipient: found };
       }
-
-      if (!user.isLocalDemoSession && auth.currentUser) {
-        try {
-          const uidSnap = await getDoc(doc(db, 'users', trimmed));
-          if (uidSnap.exists()) {
-            const d = uidSnap.data();
-            return {
-              ok: true,
-              recipient: {
-                uid: uidSnap.id,
-                username: String(d.username || 'Trader'),
-                email: String(d.email || ''),
-              },
-            };
-          }
-          const emailSnap = await getDocs(
-            query(collection(db, 'users'), where('email', '==', trimmed.toLowerCase()))
-          );
-          if (!emailSnap.empty) {
-            const first = emailSnap.docs[0];
-            const d = first.data();
-            return {
-              ok: true,
-              recipient: {
-                uid: first.id,
-                username: String(d.username || 'Trader'),
-                email: String(d.email || ''),
-              },
-            };
-          }
-        } catch {
-          // Ignore Firestore lookup failure
-        }
-      }
-
       return { ok: false, error: "Account doesn't exist." };
     },
-    [user.uid, user.email, user.isLocalDemoSession]
+    [user.uid, user.email]
   );
 
   const handleSubmitTransfer = async (
@@ -3224,55 +2587,30 @@ export default function App() {
       return { ok: false, error: 'Cannot transfer to your own account.' };
     }
 
-    let resolvedRecipient: VerifiedTransferRecipient = {
-      uid: recipient,
-      username: recipient,
-      email: recipient,
-    };
-    let nextSenderBalance = Number((avail - amount).toFixed(2));
-    let nextRecipientBalance: number | null = null;
+    const result = await executeP2PTransferStatic({
+      senderUid: user.uid,
+      senderEmail: user.email,
+      recipientIdentifier: recipient,
+      accountMode,
+      amount,
+      pin,
+      isLocalDemoSession: user.isLocalDemoSession,
+      localSenderBalance: avail,
+      expectedLocalPin: user.pin,
+    });
 
-    try {
-      const res = await fetch('/api/wallet/transfer', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-        },
-        body: JSON.stringify({
-          senderUid: user.uid,
-          senderEmail: user.email,
-          recipientIdentifier: recipient,
-          accountMode,
-          amount,
-          pin,
-          localSenderBalance: avail,
-          expectedPin: user.pin,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const errMsg = typeof data?.error === 'string' ? data.error : "Account doesn't exist.";
-        showToast(errMsg, 'error');
-        return { ok: false, error: errMsg };
-      }
-      if (data?.recipient) {
-        resolvedRecipient = {
-          uid: String(data.recipient.uid),
-          username: String(data.recipient.username || data.recipient.uid),
-          email: String(data.recipient.email || ''),
-        };
-        if (typeof data.recipient.newBalance === 'number') {
-          nextRecipientBalance = Number(data.recipient.newBalance);
-        }
-      }
-      if (typeof data?.senderRemainingBalance === 'number') {
-        nextSenderBalance = Number(data.senderRemainingBalance);
-      }
-    } catch {
-      showToast('Unable to verify transfer on server. Please try again.', 'error');
-      return { ok: false, error: 'Unable to verify transfer on server.' };
+    if (!result.ok) {
+      showToast(result.error, 'error');
+      return { ok: false, error: result.error };
     }
+
+    const resolvedRecipient: VerifiedTransferRecipient = {
+      uid: result.recipient.uid,
+      username: result.recipient.username,
+      email: result.recipient.email,
+    };
+    const nextSenderBalance = result.senderRemainingBalance;
+    const nextRecipientBalance = result.recipient.newBalance;
 
     setUser((prev) => ({
       ...prev,
@@ -3291,13 +2629,9 @@ export default function App() {
         return {
           ...m,
           realBalance:
-            accountMode === 'real'
-              ? nextRecipientBalance ?? Number((m.realBalance + amount).toFixed(2))
-              : m.realBalance,
+            accountMode === 'real' ? nextRecipientBalance : m.realBalance,
           demoBalance:
-            accountMode === 'demo'
-              ? nextRecipientBalance ?? Number((m.demoBalance + amount).toFixed(2))
-              : m.demoBalance,
+            accountMode === 'demo' ? nextRecipientBalance : m.demoBalance,
         };
       })
     );
@@ -3318,7 +2652,7 @@ export default function App() {
       ...prev,
     ]);
 
-    if (!user.isLocalDemoSession && auth.currentUser) {
+    if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
       const balField = accountMode === 'demo' ? 'demoBalance' : 'realBalance';
       try {
         await updateDoc(doc(db, 'users', auth.currentUser.uid), {
@@ -3334,22 +2668,20 @@ export default function App() {
           createdAt: serverTimestamp(),
         });
       } catch {
-        // Cloud SQL already completed atomically
+        // Local storage already persisted cleanly
       }
-      if (nextRecipientBalance !== null) {
-        updateDoc(doc(db, 'users', resolvedRecipient.uid), {
-          [balField]: nextRecipientBalance,
-        }).catch(() => {});
-        addDoc(collection(db, 'users', resolvedRecipient.uid, 'transactions'), {
-          userId: resolvedRecipient.uid,
-          userEmail: resolvedRecipient.email,
-          type: `P2P TRANSFER RECEIVED (${accountMode.toUpperCase()})`,
-          amount,
-          target: `${user.username} (${user.uid})`,
-          status: 'SUCCESS',
-          createdAt: serverTimestamp(),
-        }).catch(() => {});
-      }
+      updateDoc(doc(db, 'users', resolvedRecipient.uid), {
+        [balField]: nextRecipientBalance,
+      }).catch(() => {});
+      addDoc(collection(db, 'users', resolvedRecipient.uid, 'transactions'), {
+        userId: resolvedRecipient.uid,
+        userEmail: resolvedRecipient.email,
+        type: `P2P TRANSFER RECEIVED (${accountMode.toUpperCase()})`,
+        amount,
+        target: `${user.username} (${user.uid})`,
+        status: 'SUCCESS',
+        createdAt: serverTimestamp(),
+      }).catch(() => {});
     }
 
     showToast(`Transferred $${amount.toFixed(2)} to ${resolvedRecipient.username} (${resolvedRecipient.uid}).`);
@@ -3358,21 +2690,10 @@ export default function App() {
 
   const handleSavePin = async (pin: string) => {
     setUser((prev) => ({ ...prev, pin }));
-    if (authToken) {
-      try {
-        await fetch('/api/profile/pin', {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({ pin }),
-        });
-      } catch {
-        // ignore network error
-      }
+    if (!user.isLocalDemoSession) {
+      await updateMemberFieldsStatic(user.uid, { securityPin: pin });
     }
-    if (!user.isLocalDemoSession && auth.currentUser) {
+    if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
       try {
         await updateDoc(doc(db, 'users', auth.currentUser.uid), { securityPin: pin });
       } catch {
@@ -3383,62 +2704,44 @@ export default function App() {
   };
 
   const handleSaveOwnProfile = async (payload: MemberProfileUpdatePayload): Promise<boolean> => {
-    if (authToken && !user.isLocalDemoSession) {
-      try {
-        const res = await fetch('/api/profile', {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Failed to update profile.', 'error');
-          return false;
-        }
-        if (data?.user) {
-          const u = data.user as Record<string, unknown>;
-          setUser((prev) => ({
-            ...prev,
-            username: String(u.username || payload.username || prev.username),
-            avatarUrl: (u.avatarUrl as string | null | undefined) ?? null,
-            fullName: (u.fullName as string | null | undefined) ?? null,
-            phone: (u.phone as string | null | undefined) ?? null,
-            country: (u.country as string | null | undefined) ?? null,
-            bio: (u.bio as string | null | undefined) ?? null,
-            withdrawMethod: (u.withdrawMethod as WithdrawMethod | undefined) ?? prev.withdrawMethod,
-            withdrawAccountName: (u.withdrawAccountName as string | null | undefined) ?? null,
-            withdrawAccountNumber: (u.withdrawAccountNumber as string | null | undefined) ?? null,
-          }));
-        }
-      } catch {
-        showToast('Network error saving profile.', 'error');
-        return false;
-      }
-    } else {
-      setUser((prev) => ({
-        ...prev,
-        username: payload.username ?? prev.username,
-        avatarUrl: payload.avatarUrl !== undefined ? payload.avatarUrl : prev.avatarUrl,
-        fullName: payload.fullName !== undefined ? payload.fullName : prev.fullName,
-        phone: payload.phone !== undefined ? payload.phone : prev.phone,
-        country: payload.country !== undefined ? payload.country : prev.country,
-        bio: payload.bio !== undefined ? payload.bio : prev.bio,
-        withdrawMethod: payload.withdrawMethod ?? prev.withdrawMethod,
-        withdrawAccountName:
-          payload.withdrawAccountName !== undefined
-            ? payload.withdrawAccountName
-            : prev.withdrawAccountName,
-        withdrawAccountNumber:
-          payload.withdrawAccountNumber !== undefined
-            ? payload.withdrawAccountNumber
-            : prev.withdrawAccountNumber,
-      }));
+    setUser((prev) => ({
+      ...prev,
+      username: payload.username ?? prev.username,
+      avatarUrl: payload.avatarUrl !== undefined ? payload.avatarUrl : prev.avatarUrl,
+      fullName: payload.fullName !== undefined ? payload.fullName : prev.fullName,
+      phone: payload.phone !== undefined ? payload.phone : prev.phone,
+      country: payload.country !== undefined ? payload.country : prev.country,
+      bio: payload.bio !== undefined ? payload.bio : prev.bio,
+      withdrawMethod: payload.withdrawMethod ?? prev.withdrawMethod,
+      withdrawAccountName:
+        payload.withdrawAccountName !== undefined
+          ? payload.withdrawAccountName
+          : prev.withdrawAccountName,
+      withdrawAccountNumber:
+        payload.withdrawAccountNumber !== undefined
+          ? payload.withdrawAccountNumber
+          : prev.withdrawAccountNumber,
+    }));
+
+    if (!user.isLocalDemoSession) {
+      await updateMemberFieldsStatic(user.uid, {
+        ...(payload.username ? { username: payload.username } : {}),
+        ...(payload.avatarUrl !== undefined ? { avatarUrl: payload.avatarUrl } : {}),
+        ...(payload.fullName !== undefined ? { fullName: payload.fullName } : {}),
+        ...(payload.phone !== undefined ? { phone: payload.phone } : {}),
+        ...(payload.country !== undefined ? { country: payload.country } : {}),
+        ...(payload.bio !== undefined ? { bio: payload.bio } : {}),
+        ...(payload.withdrawMethod ? { withdrawMethod: payload.withdrawMethod } : {}),
+        ...(payload.withdrawAccountName !== undefined
+          ? { withdrawAccountName: payload.withdrawAccountName }
+          : {}),
+        ...(payload.withdrawAccountNumber !== undefined
+          ? { withdrawAccountNumber: payload.withdrawAccountNumber }
+          : {}),
+      });
     }
 
-    if (!user.isLocalDemoSession && auth.currentUser) {
+    if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
       try {
         await updateDoc(doc(db, 'users', auth.currentUser.uid), {
           ...(payload.username ? { username: payload.username } : {}),
@@ -3462,12 +2765,12 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      if (auth) await signOut(auth);
     } catch {
       // ignore
     }
     try {
-      await signOut(oauthAuth);
+      if (oauthAuth) await signOut(oauthAuth);
     } catch {
       // ignore
     }
@@ -3486,7 +2789,26 @@ export default function App() {
   };
 
   const copyText = (val: string, label: string) => {
-    navigator.clipboard?.writeText(val);
+    const fallbackCopy = () => {
+      try {
+        const el = document.createElement('textarea');
+        el.value = val;
+        el.setAttribute('readonly', '');
+        el.style.position = 'fixed';
+        el.style.opacity = '0';
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+      } catch {
+        // Ignore clipboard denial in restricted iframe contexts
+      }
+    };
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(val).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
     showToast(`Copied ${label}: ${val}`);
   };
 
@@ -3528,131 +2850,22 @@ export default function App() {
   const handleSearchMembers = async (queryText: string) => {
     const isStaffSearch = ['admin', 'staff', 'caiwu'].includes(user.role);
     if (!isStaffSearch) return;
-    if (user.isLocalDemoSession && !authToken) {
-      return;
-    }
-
-    const merged = new Map<string, ManagedMember>();
-    if (authToken && isStaffSearch) {
-      try {
-        const url = queryText
-          ? `/api/admin/members?q=${encodeURIComponent(queryText)}`
-          : '/api/admin/members';
-        const res = await fetch(url, {
-          headers: { Authorization: `Bearer ${authToken}` },
+    try {
+      const list = await listMembersStatic(queryText);
+      if (list.length > 0) {
+        setManagedMembers((prev) => {
+          const map = new Map(prev.map((m) => [m.uid, m]));
+          for (const item of list) map.set(item.uid, item);
+          return Array.from(map.values());
         });
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data?.members)) {
-            for (const m of data.members as Record<string, unknown>[]) {
-              const uid = String(m.uid || '');
-              if (!uid) continue;
-              merged.set(uid, {
-                uid,
-                username: String(m.username || 'Trader'),
-                email: String(m.email || ''),
-                role: (m.role as UserRole) || 'user',
-                isBlocked: Boolean(m.isBlocked),
-                isWithdrawBlocked: Boolean(m.isWithdrawBlocked),
-                hasDepositedBefore: Boolean(m.hasDepositedBefore),
-                hasTradedAfterDeposit: Boolean(m.hasTradedAfterDeposit),
-                withdrawLockClearedByAdmin: Boolean(m.withdrawLockClearedByAdmin),
-                realBalance: Number(m.realBalance ?? 0),
-                demoBalance: Number(m.demoBalance ?? 100000),
-                securityPin: m.securityPin ? String(m.securityPin) : undefined,
-                invitedBy: m.invitedBy ? String(m.invitedBy) : null,
-                avatarUrl: m.avatarUrl ? String(m.avatarUrl) : null,
-                fullName: m.fullName ? String(m.fullName) : null,
-                phone: m.phone ? String(m.phone) : null,
-                country: m.country ? String(m.country) : null,
-                bio: m.bio ? String(m.bio) : null,
-                withdrawMethod: (m.withdrawMethod as WithdrawMethod | undefined) || 'kpay',
-                withdrawAccountName: m.withdrawAccountName ? String(m.withdrawAccountName) : null,
-                withdrawAccountNumber: m.withdrawAccountNumber ? String(m.withdrawAccountNumber) : null,
-              });
-            }
-          }
-        }
-      } catch {
-        // continue to Firestore fallback/merge
       }
-    }
-
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        const toMember = (id: string, d: Record<string, unknown>): ManagedMember => ({
-          uid: id,
-          username: String(d.username || 'Trader'),
-          email: String(d.email || ''),
-          role: (d.role as UserRole) || 'user',
-          isBlocked: !!d.isBlocked,
-          isWithdrawBlocked: !!d.isWithdrawBlocked,
-          hasDepositedBefore: !!d.hasDepositedBefore,
-          hasTradedAfterDeposit: !!d.hasTradedAfterDeposit,
-          withdrawLockClearedByAdmin: !!d.withdrawLockClearedByAdmin,
-          realBalance: Number(d.realBalance ?? 0),
-          demoBalance: Number(d.demoBalance ?? 100000),
-          securityPin: d.securityPin ? String(d.securityPin) : undefined,
-          invitedBy: d.invitedBy ? String(d.invitedBy) : null,
-          avatarUrl: d.avatarUrl ? String(d.avatarUrl) : null,
-          fullName: d.fullName ? String(d.fullName) : null,
-          phone: d.phone ? String(d.phone) : null,
-          country: d.country ? String(d.country) : null,
-          bio: d.bio ? String(d.bio) : null,
-          withdrawMethod: (d.withdrawMethod as WithdrawMethod | undefined) || 'kpay',
-          withdrawAccountName: d.withdrawAccountName ? String(d.withdrawAccountName) : null,
-          withdrawAccountNumber: d.withdrawAccountNumber ? String(d.withdrawAccountNumber) : null,
-        });
-
-        if (queryText) {
-          const directSnap = await getDoc(doc(db, 'users', queryText));
-          if (directSnap.exists()) {
-            const m = toMember(directSnap.id, directSnap.data());
-            if (!merged.has(m.uid)) merged.set(m.uid, m);
-          } else {
-            const emailSnap = await getDocs(
-              query(collection(db, 'users'), where('email', '==', queryText.toLowerCase()))
-            );
-            emailSnap.forEach((docSnap) => {
-              const m = toMember(docSnap.id, docSnap.data());
-              if (!merged.has(m.uid)) merged.set(m.uid, m);
-            });
-          }
-        } else {
-          const allSnap = await getDocs(collection(db, 'users'));
-          allSnap.forEach((docSnap) => {
-            const m = toMember(docSnap.id, docSnap.data());
-            if (!merged.has(m.uid)) merged.set(m.uid, m);
-          });
-        }
-      } catch {
-        // Silently ignore if Firestore rules restrict cross-user reads
-      }
-    }
-
-    if (merged.size > 0) {
-      setManagedMembers((prev) => {
-        const map = new Map(prev.map((m) => [m.uid, m]));
-        for (const [id, item] of merged.entries()) map.set(id, item);
-        return Array.from(map.values());
-      });
+    } catch {
+      // ignore cleanly
     }
   };
 
   const patchMemberServer = async (uid: string, body: Record<string, unknown>) => {
-    if (!authToken) return;
-    try {
-      await fetch(`/api/admin/members/${encodeURIComponent(uid)}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${authToken}`,
-        },
-        body: JSON.stringify(body),
-      });
-    } catch {
-      // ignore network error gracefully
-    }
+    await updateMemberFieldsStatic(uid, body as Partial<ManagedMember>);
   };
 
   const handleToggleBlockMember = async (uid: string, blocked: boolean) => {
@@ -3668,13 +2881,6 @@ export default function App() {
       setUser((prev) => ({ ...prev, isBlocked: blocked }));
     }
     await patchMemberServer(uid, { isBlocked: blocked });
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        await updateDoc(doc(db, 'users', uid), { isBlocked: blocked });
-      } catch {
-        // ignore offline fallback
-      }
-    }
     showToast(
       `${target?.username ?? uid} has been ${blocked ? 'BLOCKED' : 'UNBLOCKED'}.`,
       blocked ? 'error' : 'success'
@@ -3709,16 +2915,6 @@ export default function App() {
       isWithdrawBlocked: blocked,
       ...(user.role === 'admin' ? { withdrawLockClearedByAdmin: !blocked } : {}),
     });
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        await updateDoc(doc(db, 'users', uid), {
-          isWithdrawBlocked: blocked,
-          ...(user.role === 'admin' ? { withdrawLockClearedByAdmin: !blocked } : {}),
-        });
-      } catch {
-        // ignore offline fallback
-      }
-    }
     showToast(
       `Withdrawals ${blocked ? 'locked' : 'unlocked'} for ${target?.username ?? uid}.`,
       blocked ? 'error' : 'success'
@@ -3749,16 +2945,6 @@ export default function App() {
       isWithdrawBlocked: false,
       withdrawLockClearedByAdmin: true,
     });
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        await updateDoc(doc(db, 'users', uid), {
-          isWithdrawBlocked: false,
-          withdrawLockClearedByAdmin: true,
-        });
-      } catch {
-        // ignore offline fallback
-      }
-    }
     showToast(`Admin cleared withdrawal lock for ${target?.username ?? uid}.`);
   };
 
@@ -3785,13 +2971,6 @@ export default function App() {
       setUser((prev) => ({ ...prev, [field]: nextVal }));
     }
     await patchMemberServer(uid, { [field]: nextVal });
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        await updateDoc(doc(db, 'users', uid), { [field]: nextVal });
-      } catch {
-        // ignore
-      }
-    }
     showToast(
       `${action === 'add' ? 'Added' : 'Deducted'} $${amount.toFixed(2)} (${wallet.toUpperCase()}) for ${target.username}.`
     );
@@ -3808,13 +2987,6 @@ export default function App() {
       setUser((prev) => ({ ...prev, role }));
     }
     await patchMemberServer(uid, { role });
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        await updateDoc(doc(db, 'users', uid), { role });
-      } catch {
-        // ignore
-      }
-    }
     showToast(`Updated ${target?.username ?? uid} role to ${role.toUpperCase()}.`);
   };
 
@@ -3827,55 +2999,22 @@ export default function App() {
       return false;
     }
 
-    let updatedFromServer: Record<string, unknown> | null = null;
-    if (authToken) {
-      try {
-        const res = await fetch(`/api/admin/members/${encodeURIComponent(uid)}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          showToast(data?.error || 'Failed to update member info.', 'error');
-          return false;
-        }
-        if (data?.member) {
-          updatedFromServer = data.member as Record<string, unknown>;
-        }
-      } catch {
-        showToast('Network error updating member profile.', 'error');
-        return false;
-      }
-    }
+    const updatedFromService = await updateMemberFieldsStatic(uid, {
+      ...(payload.username ? { username: payload.username } : {}),
+      ...(payload.email ? { email: payload.email.toLowerCase() } : {}),
+      ...(payload.securityPin ? { securityPin: payload.securityPin } : {}),
+      avatarUrl: payload.avatarUrl ?? null,
+      fullName: payload.fullName ?? null,
+      phone: payload.phone ?? null,
+      country: payload.country ?? null,
+      bio: payload.bio ?? null,
+      ...(payload.withdrawMethod ? { withdrawMethod: payload.withdrawMethod } : {}),
+      withdrawAccountName: payload.withdrawAccountName ?? null,
+      withdrawAccountNumber: payload.withdrawAccountNumber ?? null,
+    });
 
-    const patchMemberObj = (existing: ManagedMember): ManagedMember => {
-      if (updatedFromServer) {
-        return {
-          ...existing,
-          username: String(updatedFromServer.username || existing.username),
-          email: String(updatedFromServer.email || existing.email),
-          securityPin: updatedFromServer.securityPin
-            ? String(updatedFromServer.securityPin)
-            : existing.securityPin,
-          avatarUrl: (updatedFromServer.avatarUrl as string | null | undefined) ?? null,
-          fullName: (updatedFromServer.fullName as string | null | undefined) ?? null,
-          phone: (updatedFromServer.phone as string | null | undefined) ?? null,
-          country: (updatedFromServer.country as string | null | undefined) ?? null,
-          bio: (updatedFromServer.bio as string | null | undefined) ?? null,
-          withdrawMethod:
-            (updatedFromServer.withdrawMethod as WithdrawMethod | undefined) ??
-            existing.withdrawMethod,
-          withdrawAccountName:
-            (updatedFromServer.withdrawAccountName as string | null | undefined) ?? null,
-          withdrawAccountNumber:
-            (updatedFromServer.withdrawAccountNumber as string | null | undefined) ?? null,
-        };
-      }
-      return {
+    const patchMemberObj = (existing: ManagedMember): ManagedMember =>
+      updatedFromService ?? {
         ...existing,
         username: payload.username ?? existing.username,
         email: payload.email ?? existing.email,
@@ -3895,83 +3034,60 @@ export default function App() {
             ? payload.withdrawAccountNumber
             : existing.withdrawAccountNumber,
       };
-    };
 
     setManagedMembers((prev) => prev.map((m) => (m.uid === uid ? patchMemberObj(m) : m)));
 
     if (uid === user.uid) {
       setUser((prev) => ({
         ...prev,
-        username: (updatedFromServer?.username as string | undefined) ?? payload.username ?? prev.username,
-        email: (updatedFromServer?.email as string | undefined) ?? payload.email ?? prev.email,
-        pin: (updatedFromServer?.securityPin as string | undefined) ?? payload.securityPin ?? prev.pin,
+        username: updatedFromService?.username ?? payload.username ?? prev.username,
+        email: updatedFromService?.email ?? payload.email ?? prev.email,
+        pin: updatedFromService?.securityPin ?? payload.securityPin ?? prev.pin,
         avatarUrl:
-          updatedFromServer !== null
-            ? ((updatedFromServer.avatarUrl as string | null | undefined) ?? null)
+          updatedFromService !== null
+            ? (updatedFromService.avatarUrl ?? null)
             : payload.avatarUrl !== undefined
             ? payload.avatarUrl
             : prev.avatarUrl,
         fullName:
-          updatedFromServer !== null
-            ? ((updatedFromServer.fullName as string | null | undefined) ?? null)
+          updatedFromService !== null
+            ? (updatedFromService.fullName ?? null)
             : payload.fullName !== undefined
             ? payload.fullName
             : prev.fullName,
         phone:
-          updatedFromServer !== null
-            ? ((updatedFromServer.phone as string | null | undefined) ?? null)
+          updatedFromService !== null
+            ? (updatedFromService.phone ?? null)
             : payload.phone !== undefined
             ? payload.phone
             : prev.phone,
         country:
-          updatedFromServer !== null
-            ? ((updatedFromServer.country as string | null | undefined) ?? null)
+          updatedFromService !== null
+            ? (updatedFromService.country ?? null)
             : payload.country !== undefined
             ? payload.country
             : prev.country,
         bio:
-          updatedFromServer !== null
-            ? ((updatedFromServer.bio as string | null | undefined) ?? null)
+          updatedFromService !== null
+            ? (updatedFromService.bio ?? null)
             : payload.bio !== undefined
             ? payload.bio
             : prev.bio,
         withdrawMethod:
-          (updatedFromServer?.withdrawMethod as WithdrawMethod | undefined) ??
-          payload.withdrawMethod ??
-          prev.withdrawMethod,
+          updatedFromService?.withdrawMethod ?? payload.withdrawMethod ?? prev.withdrawMethod,
         withdrawAccountName:
-          updatedFromServer !== null
-            ? ((updatedFromServer.withdrawAccountName as string | null | undefined) ?? null)
+          updatedFromService !== null
+            ? (updatedFromService.withdrawAccountName ?? null)
             : payload.withdrawAccountName !== undefined
             ? payload.withdrawAccountName
             : prev.withdrawAccountName,
         withdrawAccountNumber:
-          updatedFromServer !== null
-            ? ((updatedFromServer.withdrawAccountNumber as string | null | undefined) ?? null)
+          updatedFromService !== null
+            ? (updatedFromService.withdrawAccountNumber ?? null)
             : payload.withdrawAccountNumber !== undefined
             ? payload.withdrawAccountNumber
             : prev.withdrawAccountNumber,
       }));
-    }
-
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        await updateDoc(doc(db, 'users', uid), {
-          ...(payload.username ? { username: payload.username } : {}),
-          ...(payload.email ? { email: payload.email.toLowerCase() } : {}),
-          ...(payload.securityPin ? { securityPin: payload.securityPin } : {}),
-          avatarUrl: payload.avatarUrl ?? null,
-          fullName: payload.fullName ?? null,
-          phone: payload.phone ?? null,
-          country: payload.country ?? null,
-          bio: payload.bio ?? null,
-          ...(payload.withdrawMethod ? { withdrawMethod: payload.withdrawMethod } : {}),
-          withdrawAccountName: payload.withdrawAccountName ?? null,
-          withdrawAccountNumber: payload.withdrawAccountNumber ?? null,
-        });
-      } catch {
-        // ignore Firestore rule errors cleanly
-      }
     }
 
     showToast(`Saved profile & withdraw details for ${payload.username || uid}.`);
@@ -3983,92 +3099,18 @@ export default function App() {
       showToast('Permission denied.', 'error');
       return;
     }
-    if (req.serverId && authToken) {
-      try {
-        const res = await fetch(`/api/staff/deposits/${req.serverId}/approve`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.member) {
-            const m = data.member as Record<string, unknown>;
-            const nextReal = Number(m.realBalance ?? 0);
-            setManagedMembers((prev) =>
-              prev.map((item) =>
-                item.uid === req.userId
-                  ? { ...item, realBalance: nextReal, hasDepositedBefore: true }
-                  : item
-              )
-            );
-            if (req.userId === user.uid) {
-              setUser((prev) => ({ ...prev, realBalance: nextReal, hasDepositedBefore: true }));
-            }
-          }
-        }
-      } catch {
-        // continue gracefully
-      }
-    }
 
-    if (!req.serverId && req.source === 'firestore' && authToken) {
-      try {
-        await fetch('/api/admin/adjust-balance', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({
-            identifier: req.userId,
-            wallet: 'real',
-            action: 'add',
-            amount: req.amount,
-          }),
-        });
-        await patchMemberServer(req.userId, { hasDepositedBefore: true });
-      } catch {
-        // continue gracefully
-      }
-    }
-
-    if (req.firestorePath && auth.currentUser) {
-      try {
-        const segments = req.firestorePath.split('/');
-        const txDocRef = doc(db, segments[0], ...segments.slice(1));
-        await updateDoc(txDocRef, { status: 'SUCCESS' });
-
-        const uRef = doc(db, 'users', req.userId);
-        const uSnap = await getDoc(uRef);
-        if (uSnap.exists()) {
-          const ud = uSnap.data();
-          const newReal = Number(ud.realBalance || 0) + req.amount;
-          const isFirstDeposit = !ud.hasDepositedBefore;
-          await updateDoc(uRef, {
-            realBalance: newReal,
-            hasDepositedBefore: true,
-          });
-          if (isFirstDeposit && ud.invitedBy && ud.invitedBy !== req.userId) {
-            const refRef = doc(db, 'users', String(ud.invitedBy));
-            const refSnap = await getDoc(refRef);
-            if (refSnap.exists()) {
-              const refBal = Number(refSnap.data().realBalance || 0);
-              const bonus = req.amount * 0.02;
-              await updateDoc(refRef, { realBalance: refBal + bonus });
-              await addDoc(collection(db, 'users', String(ud.invitedBy), 'transactions'), {
-                userId: String(ud.invitedBy),
-                type: 'REFERRAL BONUS (2% 1ST DEPOSIT REWARD)',
-                amount: bonus,
-                target: 'Real Account',
-                isAdjustment: true,
-                status: 'SUCCESS',
-                createdAt: serverTimestamp(),
-              });
-            }
-          }
-        }
-      } catch {
-        // ignore Firestore rule errors
+    const { updatedMember } = await approveDepositRequestStatic(req);
+    if (updatedMember) {
+      setManagedMembers((prev) =>
+        prev.map((item) => (item.uid === updatedMember.uid ? updatedMember : item))
+      );
+      if (updatedMember.uid === user.uid) {
+        setUser((prev) => ({
+          ...prev,
+          realBalance: updatedMember.realBalance,
+          hasDepositedBefore: true,
+        }));
       }
     }
 
@@ -4077,19 +3119,21 @@ export default function App() {
       setWalletTransactions((prev) =>
         prev.map((tx) => (tx.id === rawId ? { ...tx, status: 'APPROVED' } : tx))
       );
-      setManagedMembers((prev) =>
-        prev.map((m) =>
-          m.uid === req.userId
-            ? { ...m, realBalance: m.realBalance + req.amount, hasDepositedBefore: true }
-            : m
-        )
-      );
-      if (req.userId === user.uid) {
-        setUser((prev) => ({
-          ...prev,
-          realBalance: prev.realBalance + req.amount,
-          hasDepositedBefore: true,
-        }));
+      if (!updatedMember) {
+        setManagedMembers((prev) =>
+          prev.map((m) =>
+            m.uid === req.userId
+              ? { ...m, realBalance: m.realBalance + req.amount, hasDepositedBefore: true }
+              : m
+          )
+        );
+        if (req.userId === user.uid) {
+          setUser((prev) => ({
+            ...prev,
+            realBalance: prev.realBalance + req.amount,
+            hasDepositedBefore: true,
+          }));
+        }
       }
     }
 
@@ -4103,31 +3147,10 @@ export default function App() {
       showToast('Permission denied.', 'error');
       return;
     }
-    if (req.serverId && authToken) {
-      try {
-        await fetch(`/api/staff/deposits/${req.serverId}/reject`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({ reason: 'Verification declined. Please check details or contact support.' }),
-        });
-      } catch {
-        // ignore
-      }
-    }
-    if (req.firestorePath && auth.currentUser) {
-      try {
-        const segments = req.firestorePath.split('/');
-        await updateDoc(doc(db, segments[0], ...segments.slice(1)), {
-          status: 'FAILED',
-          rejectReason: 'Verification declined. Please check details or contact support.',
-        });
-      } catch {
-        // ignore
-      }
-    }
+    await rejectDepositRequestStatic(
+      req,
+      'Verification declined. Please check details or contact support.'
+    );
     if (req.source === 'local') {
       const rawId = req.id.replace(/^loc-/, '');
       setWalletTransactions((prev) =>
@@ -4144,26 +3167,7 @@ export default function App() {
       showToast('Permission denied.', 'error');
       return;
     }
-    if (req.serverId && authToken) {
-      try {
-        await fetch(`/api/staff/withdrawals/${req.serverId}/approve`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-      } catch {
-        // ignore
-      }
-    }
-    if (req.firestorePath && auth.currentUser) {
-      try {
-        const segments = req.firestorePath.split('/');
-        await updateDoc(doc(db, segments[0], ...segments.slice(1)), {
-          status: 'SUCCESS',
-        });
-      } catch {
-        // ignore
-      }
-    }
+    await approveWithdrawalRequestStatic(req);
     if (req.source === 'local') {
       const rawId = req.id.replace(/^loc-/, '');
       setWalletTransactions((prev) =>
@@ -4184,49 +3188,13 @@ export default function App() {
       showToast('Rejection reason is mandatory.', 'error');
       return;
     }
-    if (req.serverId && authToken) {
-      try {
-        const res = await fetch(`/api/staff/withdrawals/${req.serverId}/reject`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({ reason }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.member) {
-            const m = data.member as Record<string, unknown>;
-            const nextReal = Number(m.realBalance ?? 0);
-            setManagedMembers((prev) =>
-              prev.map((item) => (item.uid === req.userId ? { ...item, realBalance: nextReal } : item))
-            );
-            if (req.userId === user.uid) {
-              setUser((prev) => ({ ...prev, realBalance: nextReal }));
-            }
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
-    if (req.firestorePath && auth.currentUser) {
-      try {
-        const segments = req.firestorePath.split('/');
-        await updateDoc(doc(db, segments[0], ...segments.slice(1)), {
-          status: 'FAILED',
-          rejectReason: reason,
-        });
-        const uRef = doc(db, 'users', req.userId);
-        const uSnap = await getDoc(uRef);
-        if (uSnap.exists()) {
-          await updateDoc(uRef, {
-            realBalance: Number(uSnap.data().realBalance || 0) + req.amount,
-          });
-        }
-      } catch {
-        // ignore
+    const { updatedMember } = await rejectWithdrawalRequestStatic(req, reason);
+    if (updatedMember) {
+      setManagedMembers((prev) =>
+        prev.map((item) => (item.uid === updatedMember.uid ? updatedMember : item))
+      );
+      if (updatedMember.uid === user.uid) {
+        setUser((prev) => ({ ...prev, realBalance: updatedMember.realBalance }));
       }
     }
     if (req.source === 'local') {
@@ -4236,11 +3204,15 @@ export default function App() {
           tx.id === rawId ? { ...tx, status: 'REJECTED', rejectReason: reason } : tx
         )
       );
-      setManagedMembers((prev) =>
-        prev.map((m) => (m.uid === req.userId ? { ...m, realBalance: m.realBalance + req.amount } : m))
-      );
-      if (req.userId === user.uid) {
-        setUser((prev) => ({ ...prev, realBalance: prev.realBalance + req.amount }));
+      if (!updatedMember) {
+        setManagedMembers((prev) =>
+          prev.map((m) =>
+            m.uid === req.userId ? { ...m, realBalance: m.realBalance + req.amount } : m
+          )
+        );
+        if (req.userId === user.uid) {
+          setUser((prev) => ({ ...prev, realBalance: prev.realBalance + req.amount }));
+        }
       }
     }
     setPendingWithdrawals((prev) => prev.filter((item) => item.id !== req.id));
@@ -4265,95 +3237,8 @@ export default function App() {
       user.isLocalDemoSession && (q === user.uid.toLowerCase() || q === user.email.toLowerCase());
     let updatedMember: ManagedMember | null = null;
 
-    if (authToken && !isLocalOnlyDemoTarget) {
-      try {
-        const res = await fetch('/api/admin/adjust-balance', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.member) {
-            const m = data.member as Record<string, unknown>;
-            updatedMember = {
-              uid: String(m.uid || ''),
-              username: String(m.username || 'Trader'),
-              email: String(m.email || ''),
-              role: (m.role as UserRole) || 'user',
-              isBlocked: Boolean(m.isBlocked),
-              isWithdrawBlocked: Boolean(m.isWithdrawBlocked),
-              hasDepositedBefore: Boolean(m.hasDepositedBefore),
-              hasTradedAfterDeposit: Boolean(m.hasTradedAfterDeposit),
-              withdrawLockClearedByAdmin: Boolean(m.withdrawLockClearedByAdmin),
-              realBalance: Number(m.realBalance ?? 0),
-              demoBalance: Number(m.demoBalance ?? 100000),
-              securityPin: m.securityPin ? String(m.securityPin) : undefined,
-              invitedBy: m.invitedBy ? String(m.invitedBy) : null,
-            };
-          }
-        }
-      } catch {
-        // continue to local/Firestore lookup
-      }
-    }
-
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        let targetUid = payload.identifier.trim();
-        let uSnap = await getDoc(doc(db, 'users', targetUid));
-        if (!uSnap.exists()) {
-          const qSnap = await getDocs(
-            query(collection(db, 'users'), where('email', '==', q))
-          );
-          if (!qSnap.empty) {
-            uSnap = qSnap.docs[0];
-            targetUid = uSnap.id;
-          }
-        }
-        if (uSnap.exists()) {
-          const d = uSnap.data();
-          const field = payload.wallet === 'real' ? 'realBalance' : 'demoBalance';
-          const currentVal = Number(d[field] || 0);
-          const nextVal =
-            payload.action === 'add'
-              ? currentVal + payload.amount
-              : Math.max(0, currentVal - payload.amount);
-          await updateDoc(doc(db, 'users', targetUid), { [field]: nextVal });
-          await addDoc(collection(db, 'users', targetUid, 'transactions'), {
-            userId: targetUid,
-            type: payload.action === 'add' ? 'SYSTEM CREDIT' : 'SYSTEM ADJUSTMENT',
-            amount: payload.amount,
-            target: 'System Wallet',
-            isAdjustment: true,
-            adminReason: payload.reason,
-            status: 'SUCCESS',
-            createdAt: serverTimestamp(),
-          });
-          if (!updatedMember) {
-            updatedMember = {
-              uid: targetUid,
-              username: String(d.username || 'Trader'),
-              email: String(d.email || ''),
-              role: (d.role as UserRole) || 'user',
-              isBlocked: !!d.isBlocked,
-              isWithdrawBlocked: !!d.isWithdrawBlocked,
-              hasDepositedBefore: !!d.hasDepositedBefore,
-              hasTradedAfterDeposit: !!d.hasTradedAfterDeposit,
-              withdrawLockClearedByAdmin: !!d.withdrawLockClearedByAdmin,
-              realBalance: payload.wallet === 'real' ? nextVal : Number(d.realBalance || 0),
-              demoBalance: payload.wallet === 'demo' ? nextVal : Number(d.demoBalance || 100000),
-              securityPin: d.securityPin ? String(d.securityPin) : undefined,
-              invitedBy: d.invitedBy ? String(d.invitedBy) : null,
-            };
-          }
-        }
-      } catch {
-        // ignore Firestore rule errors
-      }
+    if (!isLocalOnlyDemoTarget) {
+      updatedMember = await adjustMemberBalanceStatic(payload);
     }
 
     if (!updatedMember) {
@@ -4427,82 +3312,7 @@ export default function App() {
       return false;
     }
     const q = identifier.trim().toLowerCase();
-    let updatedMember: ManagedMember | null = null;
-
-    if (authToken) {
-      try {
-        const res = await fetch('/api/admin/assign-role', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({ identifier, role }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.member) {
-            const m = data.member as Record<string, unknown>;
-            updatedMember = {
-              uid: String(m.uid || ''),
-              username: String(m.username || 'Trader'),
-              email: String(m.email || ''),
-              role: (m.role as UserRole) || role,
-              isBlocked: Boolean(m.isBlocked),
-              isWithdrawBlocked: Boolean(m.isWithdrawBlocked),
-              hasDepositedBefore: Boolean(m.hasDepositedBefore),
-              hasTradedAfterDeposit: Boolean(m.hasTradedAfterDeposit),
-              withdrawLockClearedByAdmin: Boolean(m.withdrawLockClearedByAdmin),
-              realBalance: Number(m.realBalance ?? 0),
-              demoBalance: Number(m.demoBalance ?? 100000),
-              securityPin: m.securityPin ? String(m.securityPin) : undefined,
-              invitedBy: m.invitedBy ? String(m.invitedBy) : null,
-            };
-          }
-        }
-      } catch {
-        // continue
-      }
-    }
-
-    if (!user.isLocalDemoSession && auth.currentUser) {
-      try {
-        let targetUid = identifier.trim();
-        let uSnap = await getDoc(doc(db, 'users', targetUid));
-        if (!uSnap.exists()) {
-          const qSnap = await getDocs(
-            query(collection(db, 'users'), where('email', '==', q))
-          );
-          if (!qSnap.empty) {
-            uSnap = qSnap.docs[0];
-            targetUid = uSnap.id;
-          }
-        }
-        if (uSnap.exists()) {
-          await updateDoc(doc(db, 'users', targetUid), { role });
-          const d = uSnap.data();
-          if (!updatedMember) {
-            updatedMember = {
-              uid: targetUid,
-              username: String(d.username || 'Trader'),
-              email: String(d.email || ''),
-              role,
-              isBlocked: !!d.isBlocked,
-              isWithdrawBlocked: !!d.isWithdrawBlocked,
-              hasDepositedBefore: !!d.hasDepositedBefore,
-              hasTradedAfterDeposit: !!d.hasTradedAfterDeposit,
-              withdrawLockClearedByAdmin: !!d.withdrawLockClearedByAdmin,
-              realBalance: Number(d.realBalance ?? 0),
-              demoBalance: Number(d.demoBalance ?? 100000),
-              securityPin: d.securityPin ? String(d.securityPin) : undefined,
-              invitedBy: d.invitedBy ? String(d.invitedBy) : null,
-            };
-          }
-        }
-      } catch {
-        // ignore Firestore rule errors
-      }
-    }
+    let updatedMember = await assignMemberRoleStatic(identifier, role);
 
     if (!updatedMember) {
       const localMatch = managedMembers.find(
@@ -4574,6 +3384,7 @@ export default function App() {
         activeSection={activeSection}
         onSelectSection={handleSelectSection}
         csrTelegramLink={csrTelegramLink}
+        brandLogoUrl={brandLogoUrl}
         onPrimaryAction={() => {
           if (!user.isLoggedIn) {
             handleEnterDemoWorkspace();
@@ -4666,6 +3477,9 @@ export default function App() {
               }}
               onCopyUid={() => copyText(user.uid, 'User ID')}
               onCopyReferral={() => copyText(user.uid, 'Invitation Code')}
+              onCopyInviteLink={() =>
+                copyText(`${window.location.origin}/?ref=${encodeURIComponent(user.uid)}`, 'Invitation Link')
+              }
               onOpenProfileEditModal={() => setProfileEditModalOpen(true)}
               onOpenPinModal={() => setPinModalOpen(true)}
               onOpenSwapModal={(sym, dir) =>
@@ -4731,11 +3545,56 @@ export default function App() {
         </main>
       )}
 
-      {/* Quiet Footer */}
-      <footer className="border-t border-slate-800/80 bg-slate-950 py-4 px-3 sm:px-6 text-[10px] sm:text-xs text-slate-500 mb-14 sm:mb-0">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-center sm:text-left">
-          <span className="font-semibold text-slate-400">Zectrade Global Financial Technologies Ltd. © 2026</span>
-          <span>Multi-asset trading &amp; Lottery Live prediction engine.</span>
+      {/* Institutional Footer */}
+      <footer
+        data-testid="global-footer"
+        className="border-t border-slate-800/80 bg-slate-950 py-5 sm:py-6 px-3 sm:px-6 mb-14 sm:mb-0"
+      >
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center md:items-center justify-between gap-4">
+          {/* Left: Brand Crest & Descriptor */}
+          <div className="flex items-center gap-3 text-left">
+            <div className="p-[1.5px] rounded-xl bg-gradient-to-br from-blue-500/80 via-indigo-500/70 to-amber-400/80 shrink-0">
+              <div className="w-9 h-9 rounded-[10px] bg-slate-950 flex items-center justify-center overflow-hidden">
+                <img
+                  src={brandLogoUrl?.trim() || '/favicon.svg'}
+                  alt="Zectrade Global icon"
+                  onError={(e) => {
+                    const img = e.currentTarget;
+                    if (!img.dataset.fallbackApplied) {
+                      img.dataset.fallbackApplied = '1';
+                      img.src = '/favicon.svg';
+                    }
+                  }}
+                  className="w-6 h-6 object-contain"
+                />
+              </div>
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-extrabold tracking-wide text-white uppercase">
+                  ZECTRADE
+                </span>
+                <span className="px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/35 text-amber-400 font-mono text-[10px] font-bold tracking-wider uppercase whitespace-nowrap">
+                  GLOBAL LTD
+                </span>
+              </div>
+              <p className="text-[11px] sm:text-xs text-slate-400 mt-0.5">
+                Authorized Spot &amp; Perpetual Commodities Trading Platform
+              </p>
+            </div>
+          </div>
+
+          {/* Right: Copyright & Derivative Risk Disclaimer */}
+          <div className="text-center md:text-right space-y-1 max-w-xl">
+            <p className="font-mono text-[11px] sm:text-xs text-slate-300">
+              Zectrade Global Financial Technologies Ltd. © 2026. All Rights Reserved.
+            </p>
+            <p className="text-[10px] sm:text-[11px] text-slate-500 leading-relaxed">
+              Trading derivatives carries significant risk to your capital. Markets are real-time
+              settled via Tier-1 Mainnet Oracles. Past execution performance is not indicative of
+              future returns; profits are not guaranteed.
+            </p>
+          </div>
         </div>
       </footer>
 
@@ -4825,6 +3684,17 @@ export default function App() {
         <StaffControlModal
           userRole={user.role}
           currentUserUid={user.uid}
+          brandLogoUrl={brandLogoUrl}
+          onSaveBrandLogo={async (nextLogoUrl) => {
+            setBrandLogoUrl(nextLogoUrl);
+            await saveBrandLogoStatic(nextLogoUrl);
+            showToast(
+              nextLogoUrl
+                ? 'Brand logo & browser tab icon updated.'
+                : 'Reset to default Zectrade Pulse logo icon.'
+            );
+            return true;
+          }}
           csrTelegramLink={csrTelegramLink}
           platformStats={platformStats}
           platformDescription={platformDescription}
@@ -4882,21 +3752,7 @@ export default function App() {
             setDepositRateMMK(payload.depositRateMMK);
             setWithdrawRateMMK(payload.withdrawRateMMK);
             setDepositAccounts(payload.depositAccounts);
-            if (!user.isLocalDemoSession && auth.currentUser) {
-              try {
-                await Promise.all([
-                  setDoc(doc(db, 'settings', 'csrConfig'), { telegramLink: payload.csrTelegramLink }),
-                  setDoc(doc(db, 'settings', 'landingStats'), payload.platformStats),
-                  setDoc(doc(db, 'settings', 'exchangeRates'), {
-                    depositMMK: payload.depositRateMMK,
-                    withdrawMMK: payload.withdrawRateMMK,
-                  }),
-                  setDoc(doc(db, 'settings', 'depositAccounts'), payload.depositAccounts),
-                ]);
-              } catch {
-                // ignore Firestore rule errors cleanly
-              }
-            }
+            await savePlatformSettingsStatic(payload);
             showToast('Platform settings saved.');
           }}
           adminCoins={adminCoins}
@@ -4915,16 +3771,7 @@ export default function App() {
           onSaveFaqAndDesc={async (desc, faqs) => {
             setPlatformDescription(desc);
             setFaqEntries(faqs);
-            if (!user.isLocalDemoSession && auth.currentUser) {
-              try {
-                await setDoc(doc(db, 'settings', 'faqConfig'), {
-                  platformDesc: desc,
-                  faqList: faqs,
-                });
-              } catch {
-                // ignore Firestore rule errors cleanly
-              }
-            }
+            await saveFaqAndDescStatic(desc, faqs);
             showToast('Platform description and FAQ saved.');
           }}
           initialTab={staffModalInitialTab}

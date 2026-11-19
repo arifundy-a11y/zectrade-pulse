@@ -9,6 +9,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  Image as ImageIcon,
   Newspaper,
   Pause,
   Pencil,
@@ -22,6 +23,7 @@ import {
   Trash2,
   TrendingDown,
   TrendingUp,
+  Upload,
   UserCheck,
   X,
   Zap,
@@ -57,6 +59,7 @@ import { LotteryAdminConsole, type DigitDrawSchedulePayload } from './LotteryAdm
 import { resolveNewsImageSrc } from './NewsWorkspace';
 import { NEWS_CATEGORIES, formatNewsTimestamp } from '../utils/newsUtils';
 import {
+  DEFAULT_BRAND_LOGO_URL,
   calculateSpotSwap,
   computeScheduledCoinPrice,
   convertCurrencyMmkUsd,
@@ -64,6 +67,7 @@ import {
   extractAccountTargetNumber,
   generateWalletCsv,
   getAllowedStaffTabs,
+  normalizeBrandLogoUrl,
   resolveWithdrawDefaults,
   sanitizeMemberNoticeText,
 } from '../utils/tradingEngine';
@@ -1616,6 +1620,8 @@ export const WalletHistoryModal: React.FC<{
 export const StaffControlModal: React.FC<{
   userRole: UserRole;
   currentUserUid: string;
+  brandLogoUrl?: string | null;
+  onSaveBrandLogo?: (logoUrl: string | null) => Promise<boolean>;
   csrTelegramLink: string;
   platformStats: PlatformStats;
   platformDescription: string;
@@ -1738,6 +1744,8 @@ export const StaffControlModal: React.FC<{
 }> = ({
   userRole,
   currentUserUid,
+  brandLogoUrl,
+  onSaveBrandLogo,
   csrTelegramLink,
   platformStats,
   platformDescription,
@@ -1813,6 +1821,12 @@ export const StaffControlModal: React.FC<{
   const [waveName, setWaveName] = useState(depositAccounts.wavepay.name);
   const [waveNum, setWaveNum] = useState(depositAccounts.wavepay.number);
   const [usdtAddr, setUsdtAddr] = useState(depositAccounts.usdt.number);
+
+  // Admin Brand Logo & Favicon State
+  const [logoDraft, setLogoDraft] = useState(brandLogoUrl || '');
+  const [logoBusy, setLogoBusy] = useState(false);
+  const [logoError, setLogoError] = useState<string | null>(null);
+  const logoFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Coin & Price Control Tab State (Admin-only)
   const [coinSymbolInput, setCoinSymbolInput] = useState('XU/USDT');
@@ -2129,6 +2143,155 @@ export const StaffControlModal: React.FC<{
 
       {/* TAB 1: RATES & PLATFORM STATS */}
       {tab === 'rates' && (
+        <div className="space-y-4">
+          {isAdmin && onSaveBrandLogo && (
+            <div
+              data-testid="admin-brand-logo-panel"
+              className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-3 text-xs"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                <div className="flex items-center gap-2">
+                  <ImageIcon className="w-4 h-4 text-amber-400 shrink-0" aria-hidden="true" />
+                  <div>
+                    <p className="font-bold text-white">Brand Logo &amp; Browser Tab Icon</p>
+                    <p className="text-[10px] text-slate-400">
+                      Updates the browser tab favicon and navigation logo across the platform.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5">
+                  <img
+                    src={logoDraft.trim() || DEFAULT_BRAND_LOGO_URL}
+                    alt="Browser tab icon preview"
+                    data-testid="admin-brand-logo-preview"
+                    onError={(e) => {
+                      const img = e.currentTarget;
+                      if (!img.dataset.fallbackApplied) {
+                        img.dataset.fallbackApplied = '1';
+                        img.src = DEFAULT_BRAND_LOGO_URL;
+                      }
+                    }}
+                    className="w-4 h-4 rounded object-cover shrink-0"
+                  />
+                  <span className="text-[11px] font-semibold text-slate-200 whitespace-nowrap">
+                    Zectrade Pulse
+                  </span>
+                  <span className="text-[10px] text-slate-500">Tab Preview</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+                <div className="sm:col-span-7">
+                  <label htmlFor="admin-brand-logo-url" className="text-[10px] text-slate-400 block mb-1">
+                    Logo / Favicon URL or Uploaded Icon Data
+                  </label>
+                  <input
+                    id="admin-brand-logo-url"
+                    type="text"
+                    value={logoDraft}
+                    onChange={(e) => {
+                      setLogoDraft(e.target.value);
+                      setLogoError(null);
+                    }}
+                    placeholder="/favicon.svg or https://example.com/logo.png"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white font-mono focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+                <div className="sm:col-span-5 flex flex-wrap sm:flex-nowrap items-center gap-2">
+                  <input
+                    ref={logoFileInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml,image/x-icon"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      setLogoError(null);
+                      try {
+                        if (
+                          file.type === 'image/svg+xml' ||
+                          file.type === 'image/x-icon' ||
+                          file.name.toLowerCase().endsWith('.svg') ||
+                          file.name.toLowerCase().endsWith('.ico')
+                        ) {
+                          if (file.size > 250 * 1024) {
+                            setLogoError('SVG/ICO icon must be under 250 KB.');
+                            return;
+                          }
+                          const dataUrl = await new Promise<string>((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(String(reader.result || ''));
+                            reader.onerror = () => reject(new Error('Failed to read icon file.'));
+                            reader.readAsDataURL(file);
+                          });
+                          setLogoDraft(dataUrl);
+                        } else {
+                          const dataUrl = await resizeImageFileToAvatarDataUrl(file, 256);
+                          setLogoDraft(dataUrl);
+                        }
+                      } catch (err) {
+                        setLogoError(err instanceof Error ? err.message : 'Unable to process icon.');
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => logoFileInputRef.current?.click()}
+                    className="px-2.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-amber-400" aria-hidden="true" />
+                    <span>Upload</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={logoBusy}
+                    onClick={async () => {
+                      const parsed = normalizeBrandLogoUrl(logoDraft);
+                      if (!parsed.ok) {
+                        setLogoError(parsed.error);
+                        return;
+                      }
+                      setLogoError(null);
+                      setLogoBusy(true);
+                      try {
+                        await onSaveBrandLogo(parsed.url);
+                      } finally {
+                        setLogoBusy(false);
+                      }
+                    }}
+                    data-testid="admin-save-brand-logo-btn"
+                    className="px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold whitespace-nowrap shrink-0"
+                  >
+                    {logoBusy ? 'Saving...' : 'Save Logo'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={logoBusy}
+                    onClick={async () => {
+                      setLogoError(null);
+                      setLogoBusy(true);
+                      try {
+                        setLogoDraft('');
+                        await onSaveBrandLogo(null);
+                      } finally {
+                        setLogoBusy(false);
+                      }
+                    }}
+                    title="Reset to default Zectrade Pulse icon"
+                    className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white shrink-0"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+
+              {logoError && (
+                <p className="text-[11px] text-red-400 font-medium">{logoError}</p>
+              )}
+            </div>
+          )}
+
         <form onSubmit={handleSaveRates} className="space-y-3 text-xs">
           <div>
             <label className="text-[10px] text-slate-400 block mb-1">CSR Telegram Support Link</label>
@@ -2254,6 +2417,7 @@ export const StaffControlModal: React.FC<{
             Save Settings
           </button>
         </form>
+        </div>
       )}
 
       {/* TAB 1B: ADMIN CUSTOM COIN & PRICE LIQUIDATION CONTROL */}

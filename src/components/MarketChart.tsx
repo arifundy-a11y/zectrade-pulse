@@ -20,6 +20,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import type { MarketQuote, MarketSymbol } from '../types';
+import { getCustomCoinKlinesStatic } from '../services/coinsService';
 import {
   type ChartTimeframe,
   type OhlcvCandle,
@@ -233,13 +234,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         setDataSource('live');
       }
       try {
-        const res = await fetch(
-          `/api/coins/${encodeURIComponent(quote.symbol)}/klines?interval=${encodeURIComponent(timeframe)}&limit=${TOTAL_CANDLES}`,
-          { signal: controller.signal }
-        );
-        if (!res.ok) return;
-        const data = await res.json();
-        const rows = Array.isArray(data?.candles) ? (data.candles as OhlcvCandle[]) : [];
+        const rows = await getCustomCoinKlinesStatic(quote.symbol, timeframe, TOTAL_CANDLES);
         if (!controller.signal.aborted && rows.length > 0) {
           setCandles(rows);
           setDataSource('live');

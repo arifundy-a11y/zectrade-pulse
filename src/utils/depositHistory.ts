@@ -3,6 +3,7 @@ import { sanitizeMemberNoticeText } from './tradingEngine';
 
 export type DepositFilterStatus = 'all' | 'pending' | 'completed' | 'rejected';
 export type NormalizedDepositStatus = 'pending' | 'completed' | 'rejected';
+export type DpWdKindFilter = 'all' | 'deposit' | 'withdrawal';
 
 export interface ServerWalletActivityRow {
   id: number;
@@ -27,6 +28,18 @@ export interface DepositHistorySummary {
   latestStatus: NormalizedDepositStatus | null;
 }
 
+export interface DpWdHistorySummary {
+  totalCount: number;
+  depositCount: number;
+  withdrawalCount: number;
+  pendingCount: number;
+  completedCount: number;
+  rejectedCount: number;
+  totalCompletedDepositsUsd: number;
+  totalCompletedWithdrawalsUsd: number;
+  totalPendingUsd: number;
+}
+
 export function isDepositTransaction(tx: Pick<WalletTransaction, 'type'>): boolean {
   const upper = (tx.type || '').toUpperCase();
   if (!upper.includes('DEPOSIT')) return false;
@@ -34,6 +47,22 @@ export function isDepositTransaction(tx: Pick<WalletTransaction, 'type'>): boole
   if (upper.includes('TRANSFER')) return false;
   if (upper.includes('WITHDRAW')) return false;
   return true;
+}
+
+export function isWithdrawalTransaction(tx: Pick<WalletTransaction, 'type'>): boolean {
+  const upper = (tx.type || '').toUpperCase();
+  if (!upper.includes('WITHDRAW')) return false;
+  if (upper.includes('TRANSFER')) return false;
+  return true;
+}
+
+export function isDpWdTransaction(tx: Pick<WalletTransaction, 'type'>): boolean {
+  return isDepositTransaction(tx) || isWithdrawalTransaction(tx);
+}
+
+export function isReferralBonusTransaction(tx: Pick<WalletTransaction, 'type'>): boolean {
+  const upper = (tx.type || '').toUpperCase();
+  return upper.includes('REFERRAL') || upper.includes('INVITE');
 }
 
 export function normalizeDepositStatus(
@@ -66,7 +95,7 @@ export function extractDepositMethodLabel(typeLabel: string): string {
   if (match && match[1]) {
     return sanitizeMemberNoticeText(match[1].trim());
   }
-  return 'Real Deposit';
+  return upper.includes('WITHDRAW') ? 'Real Withdrawal' : 'Real Deposit';
 }
 
 export function summarizeDepositTransactions(
@@ -108,6 +137,51 @@ export function summarizeDepositTransactions(
   };
 }
 
+export function summarizeDpWdTransactions(
+  transactions: WalletTransaction[]
+): DpWdHistorySummary {
+  const items = transactions.filter(isDpWdTransaction);
+  let depositCount = 0;
+  let withdrawalCount = 0;
+  let pendingCount = 0;
+  let completedCount = 0;
+  let rejectedCount = 0;
+  let totalCompletedDepositsUsd = 0;
+  let totalCompletedWithdrawalsUsd = 0;
+  let totalPendingUsd = 0;
+
+  for (const tx of items) {
+    const isDp = isDepositTransaction(tx);
+    if (isDp) depositCount += 1;
+    else withdrawalCount += 1;
+
+    const normalized = normalizeDepositStatus(tx.status);
+    const amount = Number(tx.amount || 0);
+    if (normalized === 'completed') {
+      completedCount += 1;
+      if (isDp) totalCompletedDepositsUsd += amount;
+      else totalCompletedWithdrawalsUsd += amount;
+    } else if (normalized === 'rejected') {
+      rejectedCount += 1;
+    } else {
+      pendingCount += 1;
+      totalPendingUsd += amount;
+    }
+  }
+
+  return {
+    totalCount: items.length,
+    depositCount,
+    withdrawalCount,
+    pendingCount,
+    completedCount,
+    rejectedCount,
+    totalCompletedDepositsUsd: Math.round(totalCompletedDepositsUsd * 100) / 100,
+    totalCompletedWithdrawalsUsd: Math.round(totalCompletedWithdrawalsUsd * 100) / 100,
+    totalPendingUsd: Math.round(totalPendingUsd * 100) / 100,
+  };
+}
+
 export function filterDepositTransactions(
   transactions: WalletTransaction[],
   filter: DepositFilterStatus,
@@ -128,6 +202,51 @@ export function filterDepositTransactions(
     })
     .slice()
     .sort((a, b) => (b.rawTime ?? 0) - (a.rawTime ?? 0));
+}
+
+export function filterDpWdTransactions(
+  transactions: WalletTransaction[],
+  kindFilter: DpWdKindFilter,
+  statusFilter: DepositFilterStatus,
+  searchQuery = ''
+): WalletTransaction[] {
+  const q = searchQuery.trim().toLowerCase();
+  return transactions
+    .filter((tx) => {
+      if (kindFilter === 'deposit') return isDepositTransaction(tx);
+      if (kindFilter === 'withdrawal') return isWithdrawalTransaction(tx);
+      return isDpWdTransaction(tx);
+    })
+    .filter((tx) => {
+      if (statusFilter !== 'all' && normalizeDepositStatus(tx.status) !== statusFilter) {
+        return false;
+      }
+      if (!q) return true;
+      const kindLabel = isDepositTransaction(tx) ? 'deposit' : 'withdrawal';
+      const method = extractDepositMethodLabel(tx.type).toLowerCase();
+      const target = (tx.target || '').toLowerCase();
+      const status = formatDepositStatusLabel(normalizeDepositStatus(tx.status)).toLowerCase();
+      return kindLabel.includes(q) || method.includes(q) || target.includes(q) || status.includes(q);
+    })
+    .slice()
+    .sort((a, b) => (b.rawTime ?? 0) - (a.rawTime ?? 0));
+}
+
+export function summarizeReferralTransactions(transactions: WalletTransaction[]): {
+  count: number;
+  totalEarnedUsd: number;
+  items: WalletTransaction[];
+} {
+  const items = transactions
+    .filter(isReferralBonusTransaction)
+    .slice()
+    .sort((a, b) => (b.rawTime ?? 0) - (a.rawTime ?? 0));
+  const totalEarnedUsd = items.reduce((acc, tx) => acc + Number(tx.amount || 0), 0);
+  return {
+    count: items.length,
+    totalEarnedUsd: Math.round(totalEarnedUsd * 100) / 100,
+    items,
+  };
 }
 
 function mapServerStatusToWalletStatus(status: string): WalletTransaction['status'] {
