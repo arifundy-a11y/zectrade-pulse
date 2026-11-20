@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   CHART_CACHE_VERSION,
   type ChartTimeframe,
+  DEFAULT_CHART_RIGHT_OFFSET,
   HISTORICAL_WAVE_CANDLES,
+  MAX_CHART_RIGHT_OFFSET,
   buildBinanceOrderBook,
   computeBollingerBands,
   computeCandleCutOffCountdown,
@@ -11,6 +13,7 @@ import {
   computeKdj,
   computeMacd,
   computeMovingAverage,
+  computePannableChartViewport,
   computePriceMeasurement,
   computeRsi,
   computeVisibleWindow,
@@ -256,5 +259,38 @@ test('hasFlatCandles detects flat High===Low or identical closes and wave candle
     assert.ok(hasBull && hasBear, `expected both bullish and bearish wave bars on ${tf}`);
   }
 });
+
+test('computePannableChartViewport keeps 14-candle default right offset and allows panning left to history or right up to 35 empty slots', () => {
+  assert.equal(DEFAULT_CHART_RIGHT_OFFSET, 14);
+  assert.equal(MAX_CHART_RIGHT_OFFSET, 35);
+
+  // Default live view: 48 visible slots, 14 empty slots on right -> 34 real candles (326..359)
+  const def = computePannableChartViewport(360, 48, DEFAULT_CHART_RIGHT_OFFSET, 18, 35);
+  assert.equal(def.startIdx, 326);
+  assert.equal(def.endIdx, 360);
+  assert.equal(def.clampedVisible, 48);
+  assert.equal(def.clampedRightOffset, 14);
+  assert.equal(def.rightEdgeSlot, 373);
+  assert.equal(def.leftEdgeSlot, 326);
+
+  // Panning right past max empty slots clamps strictly at 35 without inventing future candles
+  const maxRight = computePannableChartViewport(360, 48, 80, 18, 35);
+  assert.equal(maxRight.clampedRightOffset, 35);
+  assert.equal(maxRight.endIdx, 360);
+  assert.equal(maxRight.startIdx, 347);
+
+  // Continuous sub-candle fractional panning left into history
+  const midDrag = computePannableChartViewport(360, 48, -10.25, 18, 35);
+  assert.equal(midDrag.clampedRightOffset, -10.25);
+  assert.equal(midDrag.endIdx, 350);
+  assert.equal(midDrag.startIdx, 301);
+
+  // Panning all the way back to oldest candle clamps cleanly at minRightOffset (-312)
+  const oldest = computePannableChartViewport(360, 48, -999, 18, 35);
+  assert.equal(oldest.clampedRightOffset, -312);
+  assert.equal(oldest.startIdx, 0);
+  assert.equal(oldest.endIdx, 48);
+});
+
 
 

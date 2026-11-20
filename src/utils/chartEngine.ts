@@ -447,6 +447,70 @@ export function computeVisibleWindow(
   return { startIdx, endIdx, clampedVisible, clampedOffset };
 }
 
+export const DEFAULT_CHART_RIGHT_OFFSET = 14;
+export const MAX_CHART_RIGHT_OFFSET = 35;
+
+export interface PannableChartViewport {
+  startIdx: number;
+  endIdx: number; // exclusive real-candle boundary (<= totalCount, never reveals future candles)
+  clampedVisible: number;
+  clampedRightOffset: number; // positive = empty candle widths on right; negative = scrolled back into history
+  leftEdgeSlot: number;
+  rightEdgeSlot: number;
+  minRightOffset: number;
+  maxRightOffset: number;
+}
+
+export function computePannableChartViewport(
+  totalCount: number,
+  visibleCount: number,
+  rightOffsetSlots: number,
+  minVisible = 16,
+  maxRightOffset = MAX_CHART_RIGHT_OFFSET
+): PannableChartViewport {
+  if (totalCount <= 0) {
+    return {
+      startIdx: 0,
+      endIdx: 0,
+      clampedVisible: 0,
+      clampedRightOffset: 0,
+      leftEdgeSlot: 0,
+      rightEdgeSlot: 0,
+      minRightOffset: 0,
+      maxRightOffset: 0,
+    };
+  }
+  const safeMinVisible = Math.min(minVisible, Math.max(minVisible, totalCount));
+  const maxVisible = Math.max(safeMinVisible, totalCount);
+  const clampedVisible = Math.max(safeMinVisible, Math.min(maxVisible, Math.round(visibleCount)));
+
+  const effectiveMaxRight = Math.min(
+    maxRightOffset,
+    Math.max(0, clampedVisible - Math.min(3, totalCount))
+  );
+  const minAllowedRight = totalCount >= clampedVisible ? -(totalCount - clampedVisible) : 0;
+  const clampedRightOffset = Math.max(
+    minAllowedRight,
+    Math.min(effectiveMaxRight, rightOffsetSlots)
+  );
+
+  const rightEdgeSlot = totalCount - 1 + clampedRightOffset;
+  const leftEdgeSlot = rightEdgeSlot - (clampedVisible - 1);
+  const startIdx = Math.max(0, Math.floor(leftEdgeSlot));
+  const endIdx = Math.min(totalCount, Math.ceil(rightEdgeSlot) + 1);
+
+  return {
+    startIdx,
+    endIdx: Math.max(startIdx, endIdx),
+    clampedVisible,
+    clampedRightOffset,
+    leftEdgeSlot,
+    rightEdgeSlot,
+    minRightOffset: minAllowedRight,
+    maxRightOffset: effectiveMaxRight,
+  };
+}
+
 export function computeEma(candles: OhlcvCandle[], period: number): Array<number | null> {
   if (period <= 0 || candles.length === 0) return candles.map(() => null);
   const out: Array<number | null> = new Array(candles.length).fill(null);

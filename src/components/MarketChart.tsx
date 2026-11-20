@@ -30,7 +30,10 @@ import {
 import {
   type ChartTimeframe,
   type OhlcvCandle,
+  DEFAULT_CHART_RIGHT_OFFSET,
   HISTORICAL_WAVE_CANDLES,
+  MAX_CHART_RIGHT_OFFSET,
+  TIMEFRAME_MS,
   buildBinanceOrderBook,
   getCandleBucketStartMs,
   computeBollingerBands,
@@ -39,9 +42,9 @@ import {
   computeKdj,
   computeMacd,
   computeMovingAverage,
+  computePannableChartViewport,
   computePriceMeasurement,
   computeRsi,
-  computeVisibleWindow,
   computeVolumeMa,
   computeVwap,
   formatChartPrice,
@@ -65,8 +68,8 @@ interface MarketChartProps {
 const TIMEFRAMES: ChartTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1mo'];
 const TOTAL_CANDLES = 360;
 const BINANCE_HISTORY_LIMIT = 500;
-const DEFAULT_VISIBLE_CANDLES = 38;
-const MIN_VISIBLE_CANDLES = 12;
+const DEFAULT_VISIBLE_CANDLES = 48;
+const MIN_VISIBLE_CANDLES = 18;
 
 type ChartStyleMode = 'candles' | 'hollow' | 'area';
 type DrawToolMode = 'none' | 'hline' | 'measure';
@@ -128,11 +131,26 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   });
   const [dataSource, setDataSource] = useState<'live' | 'sim'>('sim');
 
-  // Zoom, Pan & Crosshair states
+  // Zoom, Pan & Crosshair states (default 14 empty candle widths between live candle and Y-axis)
   const [visibleCount, setVisibleCount] = useState<number>(DEFAULT_VISIBLE_CANDLES);
-  const [panOffset, setPanOffset] = useState<number>(0);
+  const [rightGapSlots, setRightGapSlots] = useState<number>(DEFAULT_CHART_RIGHT_OFFSET);
+  const [isDraggingChart, setIsDraggingChart] = useState(false);
   const [hoveredLocalIdx, setHoveredLocalIdx] = useState<number | null>(null);
   const [crosshairLocked, setCrosshairLocked] = useState(false);
+
+  const rightGapRef = useRef(rightGapSlots);
+  rightGapRef.current = rightGapSlots;
+  const crosshairLockedRef = useRef(crosshairLocked);
+  crosshairLockedRef.current = crosshairLocked;
+  const snapAnimRef = useRef<number | null>(null);
+  const cancelSnapAnimation = useCallback(() => {
+    if (snapAnimRef.current !== null) {
+      cancelAnimationFrame(snapAnimRef.current);
+      snapAnimRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => cancelSnapAnimation(), [cancelSnapAnimation]);
 
   // Indicators, Drawing Tools & Chart Modes
   const [chartStyle, setChartStyle] = useState<ChartStyleMode>('candles');
@@ -181,9 +199,9 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   const dragRef = useRef<{
     active: boolean;
     startX: number;
-    startOffset: number;
+    startRightGap: number;
     moved: boolean;
-  }>({ active: false, startX: 0, startOffset: 0, moved: false });
+  }>({ active: false, startX: 0, startRightGap: DEFAULT_CHART_RIGHT_OFFSET, moved: false });
   const pinchRef = useRef<{ active: boolean; startDist: number; startVisible: number }>({
     active: false,
     startDist: 0,
@@ -246,12 +264,13 @@ export const MarketChart: React.FC<MarketChartProps> = ({
 
   // Reset pan & drawings when switching symbol or timeframe
   useEffect(() => {
-    setPanOffset(0);
+    cancelSnapAnimation();
+    setRightGapSlots(DEFAULT_CHART_RIGHT_OFFSET);
     setHoveredLocalIdx(null);
     setCrosshairLocked(false);
     setMeasureStart(null);
     setMeasureEnd(null);
-  }, [quote.symbol, timeframe]);
+  }, [quote.symbol, timeframe, cancelSnapAnimation]);
 
   useEffect(() => {
     setHLines([]);
@@ -415,11 +434,23 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   const macdAll = useMemo(() => computeMacd(candles, 12, 26, 9), [candles]);
   const kdjAll = useMemo(() => computeKdj(candles, 9, 3, 3), [candles]);
 
-  // Visible window slice
+  // Visible pannable viewport slice (with default 14-candle right offset up to 35 empty right slots)
   const windowInfo = useMemo(
-    () => computeVisibleWindow(candles.length, visibleCount, panOffset, MIN_VISIBLE_CANDLES),
-    [candles.length, visibleCount, panOffset]
+    () =>
+      computePannableChartViewport(
+        candles.length,
+        visibleCount,
+        rightGapSlots,
+        MIN_VISIBLE_CANDLES,
+        MAX_CHART_RIGHT_OFFSET
+      ),
+    [candles.length, visibleCount, rightGapSlots]
   );
+
+  const windowInfoRef = useRef(windowInfo);
+  windowInfoRef.current = windowInfo;
+  const candlesLenRef = useRef(candles.length);
+  candlesLenRef.current = candles.length;
 
   const visibleCandles = useMemo(
     () => candles.slice(windowInfo.startIdx, windowInfo.endIdx),
@@ -474,31 +505,62 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     [kdjAll, windowInfo.startIdx, windowInfo.endIdx]
   );
 
+  // Smooth snap-back animation to default 14-candle right offset live view
+  const snapToDefaultLiveView = useCallback(() => {
+    cancelSnapAnimation();
+    setHoveredLocalIdx(null);
+    setCrosshairLocked(false);
+
+    const startGap = windowInfoRef.current.clampedRightOffset;
+    const targetGap = DEFAULT_CHART_RIGHT_OFFSET;
+    if (Math.abs(startGap - targetGap) < 0.05) {
+      setRightGapSlots(targetGap);
+      return;
+    }
+
+    const durationMs = 220;
+    const startTs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const step = (now: number) => {
+      const elapsed = now - startTs;
+      const t = Math.min(1, elapsed / durationMs);
+      const eased = 1 - Math.pow(1 - t, 3);
+      setRightGapSlots(startGap + (targetGap - startGap) * eased);
+      if (t < 1) {
+        snapAnimRef.current = requestAnimationFrame(step);
+      } else {
+        snapAnimRef.current = null;
+        setRightGapSlots(targetGap);
+      }
+    };
+    snapAnimRef.current = requestAnimationFrame(step);
+  }, [cancelSnapAnimation]);
+
   // Zoom & Pan action helpers
   const zoomBy = useCallback(
     (factor: number) => {
+      cancelSnapAnimation();
       setVisibleCount((prev) => {
+        const maxVis = Math.max(MIN_VISIBLE_CANDLES, candlesLenRef.current || TOTAL_CANDLES);
         const next = Math.round(prev * factor);
-        return Math.max(MIN_VISIBLE_CANDLES, Math.min(candles.length || TOTAL_CANDLES, next));
+        return Math.max(MIN_VISIBLE_CANDLES, Math.min(maxVis, next));
       });
     },
-    [candles.length]
+    [cancelSnapAnimation]
   );
 
   const panByBars = useCallback(
-    (deltaFromEnd: number) => {
-      const maxOffset = Math.max(0, candles.length - windowInfo.clampedVisible);
-      setPanOffset((prev) => Math.max(0, Math.min(maxOffset, prev + deltaFromEnd)));
+    (deltaRightGap: number) => {
+      cancelSnapAnimation();
+      const { minRightOffset, maxRightOffset } = windowInfoRef.current;
+      setRightGapSlots((prev) => Math.max(minRightOffset, Math.min(maxRightOffset, prev + deltaRightGap)));
     },
-    [candles.length, windowInfo.clampedVisible]
+    [cancelSnapAnimation]
   );
 
   const resetZoomAndPan = useCallback(() => {
     setVisibleCount(DEFAULT_VISIBLE_CANDLES);
-    setPanOffset(0);
-    setHoveredLocalIdx(null);
-    setCrosshairLocked(false);
-  }, []);
+    snapToDefaultLiveView();
+  }, [snapToDefaultLiveView]);
 
   const cycleChartStyle = () => {
     setChartStyle((s) => (s === 'candles' ? 'hollow' : s === 'hollow' ? 'area' : 'candles'));
@@ -697,8 +759,13 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     const clampedY = Math.max(priceTop, Math.min(priceBottom, svgY));
     return minPrice + ((priceBottom - clampedY) / priceHeight) * priceRange;
   };
-  const slotWidth = visibleCandles.length > 0 ? plotWidth / visibleCandles.length : plotWidth;
-  const candleX = (idx: number) => plotLeft + idx * slotWidth + slotWidth / 2;
+  const slotWidth = plotWidth / Math.max(1, windowInfo.clampedVisible);
+  const globalSlotX = (globalSlot: number) =>
+    plotLeft + (globalSlot - windowInfo.leftEdgeSlot + 0.5) * slotWidth;
+  const candleX = (localIdx: number) => globalSlotX(windowInfo.startIdx + localIdx);
+
+  const plotWidthRatioRef = useRef(1);
+  plotWidthRatioRef.current = plotWidth / Math.max(1, svgWidth);
 
   const buildLinePath = (series: Array<number | null>, yMapper: (v: number) => number = toY) => {
     const pts: string[] = [];
@@ -750,90 +817,190 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     [quote.price, quote.symbol, nowMs]
   );
 
-  const updateHoverFromClientX = (clientX: number, rect: DOMRect) => {
-    if (visibleCandles.length === 0 || rect.width <= 0) return;
-    const relX = ((clientX - rect.left) / rect.width) * svgWidth;
-    const idx = Math.floor((relX - plotLeft) / slotWidth);
-    if (idx >= 0 && idx < visibleCandles.length) {
-      setHoveredLocalIdx(idx);
-    } else if (!crosshairLocked) {
-      setHoveredLocalIdx(null);
-    }
-  };
-
-  const handleSvgClickAction = (clientX: number, clientY: number, rect: DOMRect) => {
-    if (visibleCandles.length === 0 || rect.width <= 0 || rect.height <= 0) return;
-    const relX = ((clientX - rect.left) / rect.width) * svgWidth;
-    const relY = ((clientY - rect.top) / rect.height) * svgHeight;
-    const localIdx = Math.max(0, Math.min(visibleCandles.length - 1, Math.floor((relX - plotLeft) / slotWidth)));
-    const clickedPrice = fromY(relY);
-
-    if (drawTool === 'hline') {
-      setHLines((prev) => [...prev.slice(-4), { id: `${Date.now()}`, price: clickedPrice }]);
-      return;
-    }
-
-    if (drawTool === 'measure') {
-      const globalIdx = windowInfo.startIdx + localIdx;
-      const snapPrice = visibleCandles[localIdx]?.close ?? clickedPrice;
-      if (!measureStart || (measureStart && measureEnd)) {
-        setMeasureStart({ globalIdx, price: snapPrice });
-        setMeasureEnd(null);
-      } else {
-        setMeasureEnd({ globalIdx, price: snapPrice });
+  const updateHoverFromClientX = useCallback(
+    (clientX: number, rect: DOMRect) => {
+      if (visibleCandles.length === 0 || rect.width <= 0) return;
+      const relX = ((clientX - rect.left) / rect.width) * svgWidth;
+      if (relX < plotLeft || relX > plotRight) {
+        if (!crosshairLocked) setHoveredLocalIdx(null);
+        return;
       }
-      return;
-    }
+      const globalFloat = windowInfo.leftEdgeSlot + (relX - plotLeft) / slotWidth - 0.5;
+      const gIdx = Math.round(globalFloat);
+      const localIdx = gIdx - windowInfo.startIdx;
+      if (localIdx >= 0 && localIdx < visibleCandles.length) {
+        setHoveredLocalIdx(localIdx);
+      } else if (!crosshairLocked) {
+        setHoveredLocalIdx(null);
+      }
+    },
+    [
+      visibleCandles.length,
+      svgWidth,
+      plotLeft,
+      plotRight,
+      crosshairLocked,
+      windowInfo.leftEdgeSlot,
+      windowInfo.startIdx,
+      slotWidth,
+    ]
+  );
 
-    if (crosshairLocked) {
-      updateHoverFromClientX(clientX, rect);
-    }
-  };
+  const handleSvgClickAction = useCallback(
+    (clientX: number, clientY: number, rect: DOMRect) => {
+      if (visibleCandles.length === 0 || rect.width <= 0 || rect.height <= 0) return;
+      const relX = ((clientX - rect.left) / rect.width) * svgWidth;
+      const relY = ((clientY - rect.top) / rect.height) * svgHeight;
+      const globalFloat = windowInfo.leftEdgeSlot + (relX - plotLeft) / slotWidth - 0.5;
+      const localIdx = Math.max(
+        0,
+        Math.min(visibleCandles.length - 1, Math.round(globalFloat) - windowInfo.startIdx)
+      );
+      const clickedPrice = fromY(relY);
 
-  const handleWheelZoom = (e: React.WheelEvent<SVGSVGElement>) => {
-    e.preventDefault();
-    if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 4) {
-      panByBars(e.deltaX > 0 ? -3 : 3);
-      return;
-    }
-    zoomBy(e.deltaY < 0 ? 0.85 : 1.18);
-  };
+      if (drawTool === 'hline') {
+        setHLines((prev) => [...prev.slice(-4), { id: `${Date.now()}`, price: clickedPrice }]);
+        return;
+      }
+
+      if (drawTool === 'measure') {
+        const globalIdx = windowInfo.startIdx + localIdx;
+        const snapPrice = visibleCandles[localIdx]?.close ?? clickedPrice;
+        if (!measureStart || (measureStart && measureEnd)) {
+          setMeasureStart({ globalIdx, price: snapPrice });
+          setMeasureEnd(null);
+        } else {
+          setMeasureEnd({ globalIdx, price: snapPrice });
+        }
+        return;
+      }
+
+      if (crosshairLocked) {
+        updateHoverFromClientX(clientX, rect);
+      }
+    },
+    [
+      visibleCandles,
+      svgWidth,
+      svgHeight,
+      windowInfo.leftEdgeSlot,
+      windowInfo.startIdx,
+      plotLeft,
+      slotWidth,
+      fromY,
+      drawTool,
+      measureStart,
+      measureEnd,
+      crosshairLocked,
+      updateHoverFromClientX,
+    ]
+  );
+
+  const handleSvgClickActionRef = useRef(handleSvgClickAction);
+  handleSvgClickActionRef.current = handleSvgClickAction;
+
+  // Non-passive native wheel listener for smooth mouse-wheel zoom & trackpad horizontal swipe
+  useEffect(() => {
+    const svgEl = svgRef.current;
+    if (!svgEl) return;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      cancelSnapAnimation();
+      const info = windowInfoRef.current;
+
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 2) {
+        const rect = svgEl.getBoundingClientRect();
+        const pxPerBar =
+          (rect.width * plotWidthRatioRef.current) / Math.max(1, info.clampedVisible);
+        const deltaBars = e.deltaX / Math.max(6, pxPerBar);
+        setRightGapSlots((prev) =>
+          Math.max(info.minRightOffset, Math.min(info.maxRightOffset, prev + deltaBars))
+        );
+        return;
+      }
+
+      if (e.deltaY !== 0) {
+        const factor = e.deltaY < 0 ? 0.88 : 1.14;
+        setVisibleCount((prev) => {
+          const maxVis = Math.max(MIN_VISIBLE_CANDLES, candlesLenRef.current || TOTAL_CANDLES);
+          const next = Math.round(prev * factor);
+          return Math.max(MIN_VISIBLE_CANDLES, Math.min(maxVis, next));
+        });
+      }
+    };
+
+    svgEl.addEventListener('wheel', onWheel, { passive: false });
+    return () => svgEl.removeEventListener('wheel', onWheel);
+  }, [cancelSnapAnimation]);
+
+  // Global window drag listeners so horizontal drag stays smooth even outside SVG boundaries
+  useEffect(() => {
+    const onWindowMouseMove = (e: MouseEvent) => {
+      if (!dragRef.current.active) return;
+      const dx = e.clientX - dragRef.current.startX;
+      if (!dragRef.current.moved && Math.abs(dx) > 3) {
+        dragRef.current.moved = true;
+        setIsDraggingChart(true);
+        if (!crosshairLockedRef.current) setHoveredLocalIdx(null);
+      }
+      if (dragRef.current.moved && svgRef.current) {
+        const rect = svgRef.current.getBoundingClientRect();
+        const info = windowInfoRef.current;
+        const pxPerBar =
+          (rect.width * plotWidthRatioRef.current) / Math.max(1, info.clampedVisible);
+        const barsShifted = dx / Math.max(2, pxPerBar);
+        setRightGapSlots(
+          Math.max(
+            info.minRightOffset,
+            Math.min(info.maxRightOffset, dragRef.current.startRightGap - barsShifted)
+          )
+        );
+      }
+    };
+
+    const onWindowMouseUp = (e: MouseEvent) => {
+      if (!dragRef.current.active) return;
+      const wasMoved = dragRef.current.moved;
+      dragRef.current.active = false;
+      setIsDraggingChart(false);
+      if (!wasMoved && svgRef.current) {
+        handleSvgClickActionRef.current(
+          e.clientX,
+          e.clientY,
+          svgRef.current.getBoundingClientRect()
+        );
+      }
+    };
+
+    window.addEventListener('mousemove', onWindowMouseMove);
+    window.addEventListener('mouseup', onWindowMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onWindowMouseMove);
+      window.removeEventListener('mouseup', onWindowMouseUp);
+    };
+  }, []);
 
   const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (e.button !== 0) return;
+    cancelSnapAnimation();
     dragRef.current = {
       active: true,
       startX: e.clientX,
-      startOffset: windowInfo.clampedOffset,
+      startRightGap: windowInfo.clampedRightOffset,
       moved: false,
     };
   };
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    if (dragRef.current.active) {
-      const dx = e.clientX - dragRef.current.startX;
-      if (Math.abs(dx) > 5) {
-        dragRef.current.moved = true;
-        const pxPerBar = (rect.width * (plotWidth / svgWidth)) / Math.max(1, visibleCandles.length);
-        const barsShifted = Math.round(dx / Math.max(4, pxPerBar));
-        const maxOffset = Math.max(0, candles.length - windowInfo.clampedVisible);
-        setPanOffset(Math.max(0, Math.min(maxOffset, dragRef.current.startOffset + barsShifted)));
-        return;
-      }
-    }
+    if (dragRef.current.active) return;
     if (!crosshairLocked) {
-      updateHoverFromClientX(e.clientX, rect);
+      updateHoverFromClientX(e.clientX, e.currentTarget.getBoundingClientRect());
     }
-  };
-
-  const handleMouseUp = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (dragRef.current.active && !dragRef.current.moved) {
-      handleSvgClickAction(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
-    }
-    dragRef.current.active = false;
   };
 
   const handleTouchStart = (e: React.TouchEvent<SVGSVGElement>) => {
+    cancelSnapAnimation();
     if (e.touches.length === 2) {
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
@@ -843,13 +1010,14 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         startVisible: windowInfo.clampedVisible,
       };
       dragRef.current.active = false;
+      setIsDraggingChart(false);
       return;
     }
     if (e.touches.length === 1) {
       dragRef.current = {
         active: true,
         startX: e.touches[0].clientX,
-        startOffset: windowInfo.clampedOffset,
+        startRightGap: windowInfo.clampedRightOffset,
         moved: false,
       };
     }
@@ -862,37 +1030,60 @@ export const MarketChart: React.FC<MarketChartProps> = ({
       const dist = Math.hypot(dx, dy);
       if (pinchRef.current.startDist > 10) {
         const scale = pinchRef.current.startDist / Math.max(10, dist);
+        const maxVis = Math.max(MIN_VISIBLE_CANDLES, candles.length || TOTAL_CANDLES);
         const next = Math.round(pinchRef.current.startVisible * scale);
-        setVisibleCount(Math.max(MIN_VISIBLE_CANDLES, Math.min(candles.length || TOTAL_CANDLES, next)));
+        setVisibleCount(Math.max(MIN_VISIBLE_CANDLES, Math.min(maxVis, next)));
       }
       return;
     }
     if (e.touches.length === 1 && dragRef.current.active) {
       const rect = e.currentTarget.getBoundingClientRect();
       const dx = e.touches[0].clientX - dragRef.current.startX;
-      if (Math.abs(dx) > 8) {
+      if (!dragRef.current.moved && Math.abs(dx) > 4) {
         dragRef.current.moved = true;
-        const pxPerBar = (rect.width * (plotWidth / svgWidth)) / Math.max(1, visibleCandles.length);
-        const barsShifted = Math.round(dx / Math.max(4, pxPerBar));
-        const maxOffset = Math.max(0, candles.length - windowInfo.clampedVisible);
-        setPanOffset(Math.max(0, Math.min(maxOffset, dragRef.current.startOffset + barsShifted)));
+        setIsDraggingChart(true);
+        if (!crosshairLockedRef.current) setHoveredLocalIdx(null);
+      }
+      if (dragRef.current.moved) {
+        const pxPerBar =
+          (rect.width * (plotWidth / svgWidth)) / Math.max(1, windowInfo.clampedVisible);
+        const barsShifted = dx / Math.max(2, pxPerBar);
+        setRightGapSlots(
+          Math.max(
+            windowInfo.minRightOffset,
+            Math.min(windowInfo.maxRightOffset, dragRef.current.startRightGap - barsShifted)
+          )
+        );
       } else {
         updateHoverFromClientX(e.touches[0].clientX, rect);
       }
     }
   };
 
-  const handleTouchEnd = () => {
+  const handleTouchEnd = (e: React.TouchEvent<SVGSVGElement>) => {
+    if (!dragRef.current.moved && e.changedTouches.length === 1 && svgRef.current) {
+      const t = e.changedTouches[0];
+      const rect = svgRef.current.getBoundingClientRect();
+      updateHoverFromClientX(t.clientX, rect);
+      handleSvgClickAction(t.clientX, t.clientY, rect);
+    }
     pinchRef.current.active = false;
     dragRef.current.active = false;
+    setIsDraggingChart(false);
   };
 
   const isPositive = quote.changePct >= 0;
-  const lastCandle = visibleCandles[visibleCandles.length - 1];
+  const lastCandle = candles[candles.length - 1] ?? visibleCandles[visibleCandles.length - 1];
   const liveBull = lastCandle ? lastCandle.close >= lastCandle.open : isPositive;
   const liveTagColor = liveBull ? '#0ECB81' : '#F6465D';
   const liveY = Math.max(priceTop + 10, Math.min(priceBottom - 22, toY(quote.price)));
-  const isAtLiveEdge = windowInfo.clampedOffset === 0;
+  const isAtDefaultLiveView =
+    Math.abs(windowInfo.clampedRightOffset - DEFAULT_CHART_RIGHT_OFFSET) <= 0.35;
+  const isAtLeftMax = windowInfo.clampedRightOffset <= windowInfo.minRightOffset + 0.25;
+  const isAtRightMax = windowInfo.clampedRightOffset >= windowInfo.maxRightOffset - 0.25;
+  const liveCandleLocalIdx = candles.length - 1 - windowInfo.startIdx;
+  const liveCandleVisible =
+    liveCandleLocalIdx >= 0 && liveCandleLocalIdx < visibleCandles.length;
   const zoomMultiplier = (DEFAULT_VISIBLE_CANDLES / Math.max(1, windowInfo.clampedVisible)).toFixed(1);
 
   const changeCandlePct =
@@ -1186,8 +1377,8 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                 <div className="flex items-center bg-[#12161C] border border-[#2B3139] rounded overflow-hidden">
                   <button
                     type="button"
-                    onClick={() => panByBars(Math.max(4, Math.round(windowInfo.clampedVisible * 0.25)))}
-                    disabled={windowInfo.startIdx === 0}
+                    onClick={() => panByBars(-Math.max(4, Math.round(windowInfo.clampedVisible * 0.25)))}
+                    disabled={isAtLeftMax}
                     aria-label="Pan chart earlier"
                     className="px-1.5 py-1 hover:bg-[#2B3139] disabled:opacity-40 text-slate-200"
                   >
@@ -1221,8 +1412,8 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => panByBars(-Math.max(4, Math.round(windowInfo.clampedVisible * 0.25)))}
-                    disabled={isAtLiveEdge}
+                    onClick={() => panByBars(Math.max(4, Math.round(windowInfo.clampedVisible * 0.25)))}
+                    disabled={isAtRightMax}
                     aria-label="Pan chart toward live"
                     className="px-1.5 py-1 hover:bg-[#2B3139] disabled:opacity-40 text-slate-200"
                   >
@@ -1415,60 +1606,102 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                 </div>
               )}
 
+              {/* Floating ">>" Quick-Return to Live 14-Candle Right Offset View */}
+              {!isAtDefaultLiveView && (
+                <button
+                  type="button"
+                  data-testid="chart-snap-live-btn"
+                  aria-label="Snap back to live view"
+                  title="Jump to live chart"
+                  onClick={snapToDefaultLiveView}
+                  style={{
+                    right: `${(rightAxisWidth / svgWidth) * 100}%`,
+                    bottom: `${(bottomAxisHeight / svgHeight) * 100}%`,
+                  }}
+                  className="absolute z-10 mr-2 mb-2 px-2 py-1 rounded-md bg-[#161A1E]/95 hover:bg-[#2B3139] border border-[#2B3139] hover:border-[#F0B90B]/70 text-slate-200 hover:text-[#F0B90B] text-[11px] font-mono font-bold shadow-lg backdrop-blur-xs transition-colors"
+                >
+                  &gt;&gt;
+                </button>
+              )}
+
               {/* Main SVG Candlestick & Indicator Canvas */}
               <svg
                 ref={svgRef}
                 viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-                className={`w-full select-none touch-none cursor-crosshair ${
+                className={`w-full select-none touch-none ${
+                  isDraggingChart ? 'cursor-grabbing' : 'cursor-crosshair'
+                } ${
                   isFullscreen ? 'h-full min-h-[380px]' : bookDockedRight ? 'h-full' : 'h-[230px] sm:h-[375px]'
                 }`}
                 role="img"
                 aria-label={`${quote.label} ${timeframe} candlestick chart`}
-              onWheel={handleWheelZoom}
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
-              onMouseLeave={() => {
-                dragRef.current.active = false;
-                if (!crosshairLocked) setHoveredLocalIdx(null);
-              }}
-              onTouchStart={handleTouchStart}
-              onTouchMove={handleTouchMove}
-              onTouchEnd={handleTouchEnd}
-            >
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseLeave={() => {
+                  if (!dragRef.current.active && !crosshairLocked) setHoveredLocalIdx(null);
+                }}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+              >
           <defs>
             <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={liveTagColor} stopOpacity="0.28" />
               <stop offset="100%" stopColor={liveTagColor} stopOpacity="0.02" />
             </linearGradient>
+            <clipPath id="chartPlotClip">
+              <rect x={plotLeft} y={0} width={Math.max(1, plotWidth)} height={contentBottom} />
+            </clipPath>
           </defs>
 
-          {/* Vertical Time Grid Lines */}
-          {(isCompactViewport ? [0.16, 0.5, 0.84] : [0.14, 0.34, 0.54, 0.74, 0.92]).map((rx) => {
-            const x = plotLeft + rx * plotWidth;
-            const cIdx = Math.min(
-              visibleCandles.length - 1,
-              Math.max(0, Math.floor(rx * visibleCandles.length))
-            );
-            const ts = visibleCandles[cIdx]?.time;
-            return (
-              <g key={rx}>
-                <line x1={x} x2={x} y1={priceTop} y2={contentBottom} stroke="#161B22" strokeWidth={1} />
-                {ts && (
-                  <text
-                    x={x}
-                    y={svgHeight - 6}
-                    textAnchor="middle"
-                    fill="#94A3B8"
-                    fontSize={isCompactViewport ? '10' : '10.5'}
-                    fontFamily="monospace"
-                  >
-                    {formatChartTimestamp(ts, timeframe)}
-                  </text>
-                )}
-              </g>
-            );
-          })}
+          {/* Moving Vertical Time Grid Lines + Future Grid Timestamps across Empty Right Margin */}
+          {(() => {
+            const targetTicks = isCompactViewport ? 3.2 : 5.2;
+            const rawStep = Math.max(2, windowInfo.clampedVisible / targetTicks);
+            const steps = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 60];
+            const gridStep = steps.find((s) => s >= rawStep) ?? 60;
+            const startGrid = Math.ceil(windowInfo.leftEdgeSlot / gridStep) * gridStep;
+            const endGrid = Math.floor(windowInfo.rightEdgeSlot);
+            const lastBar = candles[candles.length - 1];
+            const stepMs = TIMEFRAME_MS[timeframe];
+            const nodes: React.ReactNode[] = [];
+
+            for (let g = startGrid; g <= endGrid; g += gridStep) {
+              const x = globalSlotX(g);
+              if (x < plotLeft + 2 || x > plotRight - 2) continue;
+              let ts: number | undefined;
+              if (g >= 0 && g < candles.length) {
+                ts = candles[g].time;
+              } else if (lastBar && g >= candles.length) {
+                const futureOffset = g - (candles.length - 1);
+                if (timeframe === '1mo') {
+                  const d = new Date(lastBar.time);
+                  ts = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + futureOffset, 1);
+                } else {
+                  ts = lastBar.time + futureOffset * stepMs;
+                }
+              }
+              const showTimeLabel = ts && x >= plotLeft + 22 && x <= plotRight - 22;
+              nodes.push(
+                <g key={`grid-${g}`}>
+                  <line x1={x} x2={x} y1={priceTop} y2={contentBottom} stroke="#161B22" strokeWidth={1} />
+                  {showTimeLabel && (
+                    <text
+                      x={x}
+                      y={svgHeight - 6}
+                      textAnchor="middle"
+                      fill="#94A3B8"
+                      fontSize={isCompactViewport ? '10' : '10.5'}
+                      fontFamily="monospace"
+                    >
+                      {formatChartTimestamp(ts!, timeframe)}
+                    </text>
+                  )}
+                </g>
+              );
+            }
+            return nodes;
+          })()}
 
           {/* Horizontal Price Grid Lines & Right Y-Axis */}
           {[0.12, 0.34, 0.56, 0.78].map((ry) => {
@@ -1624,6 +1857,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
             </>
           )}
 
+          <g clipPath="url(#chartPlotClip)">
           {/* Bollinger Bands Overlay */}
           {showBoll && (
             <g>
@@ -1930,6 +2164,26 @@ export const MarketChart: React.FC<MarketChartProps> = ({
             </text>
           )}
 
+          {/* Subtle live candle pulse marker at active candle endpoint */}
+          {liveCandleVisible && (
+            <g pointerEvents="none">
+              <circle
+                cx={candleX(liveCandleLocalIdx)}
+                cy={toY(quote.price)}
+                r={5.5}
+                fill={liveTagColor}
+                fillOpacity={0.22}
+              />
+              <circle
+                cx={candleX(liveCandleLocalIdx)}
+                cy={toY(quote.price)}
+                r={2.4}
+                fill={liveTagColor}
+              />
+            </g>
+          )}
+          </g>
+
           {/* Interactive Crosshair */}
           {hoveredLocalIdx !== null && activeCandle && (
             <g pointerEvents="none">
@@ -1990,7 +2244,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
             </g>
           )}
 
-          {/* Live Last Price Line + Right-Axis Pill + Candle Cut-off Countdown */}
+          {/* Live Last Price Line (extends across empty right margin) + Right-Axis Pill + Countdown */}
           <line
             x1={plotLeft}
             x2={plotRight}
@@ -2436,21 +2690,6 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         </div>
       </div>
 
-      {/* Panning Status Hint when browsing history */}
-      {!isAtLiveEdge && (
-        <div className="flex items-center justify-between px-2 py-1 rounded-lg bg-[#161A1E] border border-[#2B3139] text-[10px] font-mono text-amber-300">
-          <span>
-            Viewing historical window ({windowInfo.startIdx + 1}–{windowInfo.endIdx} of {candles.length} bars)
-          </span>
-          <button
-            type="button"
-            onClick={() => setPanOffset(0)}
-            className="text-sky-400 hover:underline font-bold"
-          >
-            Jump to Live →
-          </button>
-        </div>
-      )}
     </div>
   );
 };
