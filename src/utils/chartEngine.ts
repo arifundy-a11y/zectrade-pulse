@@ -47,67 +47,138 @@ export function getBinanceKlineSymbol(symbol: MarketSymbol): string | null {
   }
 }
 
+export const CHART_CACHE_VERSION = 'zectrade_chart_v3';
+export const HISTORICAL_WAVE_CANDLES = 120;
+
+function seededUnit(seed: number): number {
+  const raw = Math.sin(seed * 12.9898 + 78.233) * 43758.5453123;
+  return raw - Math.floor(raw);
+}
+
 /**
- * Generates realistic trending & mean-reverting candlesticks anchored strictly to livePrice
- * so fallback/simulated charts (e.g. USOIL, custom coins, or offline) match live price scale cleanly.
+ * Detects whether a candle array is missing, too short, or contains flat historical bars
+ * (consecutive candles with High === Low or identical closes) so stale caches are purged.
+ */
+export function hasFlatCandles(candles: OhlcvCandle[] | null | undefined): boolean {
+  if (!Array.isArray(candles) || candles.length < 2) return true;
+  const histEnd = candles.length - 1;
+  for (let i = 0; i < histEnd; i++) {
+    const c = candles[i];
+    if (
+      !c ||
+      !Number.isFinite(c.open) ||
+      !Number.isFinite(c.high) ||
+      !Number.isFinite(c.low) ||
+      !Number.isFinite(c.close) ||
+      c.close <= 0 ||
+      c.high <= c.low
+    ) {
+      return true;
+    }
+    if (i > 0) {
+      const prev = candles[i - 1];
+      const eps = Math.max(1e-9, Math.abs(c.close) * 1e-7);
+      if (Math.abs(c.close - prev.close) <= eps) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Generates realistic trending & mean-reverting candlesticks backwards from livePrice
+ * using deterministic multi-frequency sine/cosine waves + UTC-bucket-seeded OHLC bodies
+ * and upper/lower wicks so all devices render identical non-flat wave patterns.
  */
 export function generateRealisticCandles(
   symbol: MarketSymbol,
   livePrice: number,
   timeframe: ChartTimeframe,
-  count = 60,
+  count = HISTORICAL_WAVE_CANDLES,
   nowMs = Date.now()
 ): OhlcvCandle[] {
+  const safeCount = Math.max(2, Math.round(count));
   const safeLive = Number.isFinite(livePrice) && livePrice > 0 ? livePrice : 100;
   const stepMs = TIMEFRAME_MS[timeframe];
   const stepVol =
     timeframe === '1m'
-      ? 0.0018
+      ? 0.0022
       : timeframe === '5m'
-      ? 0.0034
+      ? 0.0038
       : timeframe === '15m'
-      ? 0.0055
+      ? 0.0058
       : timeframe === '1h'
-      ? 0.0085
+      ? 0.0088
       : timeframe === '4h'
-      ? 0.014
+      ? 0.0145
       : timeframe === '1d'
       ? 0.022
       : timeframe === '1w'
       ? 0.042
-      : 0.075;
+      : 0.072;
 
-  const seedOffset = symbol.split('').reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
-
-  // Build backwards from safeLive so final close equals safeLive with natural waves
-  const closes = new Array<number>(count);
-  closes[count - 1] = safeLive;
-  for (let i = count - 2; i >= 0; i--) {
-    const t = i + seedOffset;
-    const cyclical = Math.sin(t * 0.42) * 0.65 + Math.cos(t * 0.19) * 0.35;
-    const micro = ((Math.sin(t * 12.9898) * 43758.5453) % 1) * 0.6;
-    const pctDelta = (cyclical + micro) * stepVol;
-    closes[i] = Math.max(0.01, closes[i + 1] / (1 + pctDelta));
-  }
+  const seedOffset = symbol
+    .split('')
+    .reduce((acc, ch, idx) => acc + ch.charCodeAt(0) * (idx + 17), 0);
 
   const alignedEndMs = getCandleBucketStartMs(nowMs, timeframe);
+  const bucketSlotSpan = Math.max(60_000, stepMs);
+
+  // Build backwards from safeLive so final close equals safeLive with organic trends, pullbacks & swings
+  const closes = new Array<number>(safeCount);
+  closes[safeCount - 1] = safeLive;
+  for (let i = safeCount - 2; i >= 0; i--) {
+    const bucketTimeMs = alignedEndMs - (safeCount - 1 - i) * stepMs;
+    const utcSlot = Math.floor(bucketTimeMs / bucketSlotSpan);
+    const phase = utcSlot + seedOffset * 0.173;
+
+    const macroTrend = Math.sin(phase * 0.082) * 0.44;
+    const swingWave = Math.cos(phase * 0.195 + 0.65) * 0.34;
+    const pullbackHarmonic = Math.sin(phase * 0.43 + 1.35) * 0.28;
+    const microNoise = (seededUnit(phase * 1.37 + 2.91) - 0.5) * 1.25;
+
+    let waveSum = macroTrend + swingWave + pullbackHarmonic + microNoise;
+    if (Math.abs(waveSum) < 0.22) {
+      const sign = seededUnit(phase * 2.41 + 0.53) >= 0.5 ? 1 : -1;
+      waveSum = sign * (0.24 + seededUnit(phase * 3.17 + 1.11) * 0.32);
+    }
+
+    const pctDelta = waveSum * stepVol;
+    closes[i] = Math.max(0.0001, closes[i + 1] / (1 + pctDelta));
+  }
+
   const candles: OhlcvCandle[] = [];
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < safeCount; i++) {
+    const bucketTimeMs = alignedEndMs - (safeCount - 1 - i) * stepMs;
+    const utcSlot = Math.floor(bucketTimeMs / bucketSlotSpan);
+    const phase = utcSlot + seedOffset * 0.173;
+
     const close = closes[i];
-    const open = i === 0 ? close * (1 - stepVol * 0.3) : closes[i - 1];
+    const openSeedDelta =
+      (seededUnit(phase * 4.07 + 0.77) >= 0.5 ? 1 : -1) *
+      stepVol *
+      (0.32 + seededUnit(phase * 4.61 + 1.23) * 0.45);
+    const open = i === 0 ? Math.max(0.0001, close * (1 - openSeedDelta)) : closes[i - 1];
+
     const bodyMove = Math.abs(close - open);
-    const baseSpread = close * stepVol * 0.45;
-    const upperWick = baseSpread * (0.35 + Math.abs(Math.sin(i * 1.7 + seedOffset)) * 0.85);
-    const lowerWick = baseSpread * (0.35 + Math.abs(Math.cos(i * 2.1 + seedOffset)) * 0.85);
+    const baseSpread = Math.max(close * stepVol * 0.48, bodyMove * 0.36);
+    const upperWick = baseSpread * (0.28 + seededUnit(phase * 5.13 + 1.7) * 1.15);
+    const lowerWick = baseSpread * (0.28 + seededUnit(phase * 7.29 + 3.9) * 1.15);
     const high = Math.max(open, close) + upperWick;
-    const low = Math.max(0.01, Math.min(open, close) - lowerWick);
+    const low = Math.max(0.0001, Math.min(open, close) - lowerWick);
     const volBase = safeLive > 10000 ? 38 : safeLive > 1000 ? 220 : 1450;
     const volume = Number(
-      (volBase * (0.55 + (bodyMove / Math.max(0.01, baseSpread)) * 0.9 + Math.abs(Math.sin(i + seedOffset)) * 0.8)).toFixed(2)
+      (
+        volBase *
+        (0.55 +
+          (bodyMove / Math.max(0.0001, baseSpread)) * 0.9 +
+          seededUnit(phase * 9.17 + 2.3) * 0.85)
+      ).toFixed(2)
     );
 
     candles.push({
-      time: alignedEndMs - (count - 1 - i) * stepMs,
+      time: bucketTimeMs,
       open,
       high,
       low,

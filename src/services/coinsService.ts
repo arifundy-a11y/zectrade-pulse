@@ -18,11 +18,13 @@ import type {
   CoinVolatilityLevel,
 } from '../types';
 import {
+  CHART_CACHE_VERSION,
   type ChartTimeframe,
+  HISTORICAL_WAVE_CANDLES,
   type OhlcvCandle,
-  TIMEFRAME_MS,
-  buildPersistentChartCandles,
+  generateRealisticCandles,
   getCandleBucketStartMs,
+  hasFlatCandles,
 } from '../utils/chartEngine';
 import {
   computeOrganicMarketTickPrice,
@@ -30,7 +32,12 @@ import {
   summarizeCoinTradeAnalytics,
 } from '../utils/tradingEngine';
 import { db, isFirebaseConfigured } from './firebaseClient';
-import { randomHexId, readStorageJson, writeStorageJson } from './storageHelper';
+import {
+  randomHexId,
+  readStorageJson,
+  removeStorageKey,
+  writeStorageJson,
+} from './storageHelper';
 
 export const CUSTOM_COINS_COLLECTION = 'custom_coins';
 const COINS_STORAGE_KEY = 'zectrade_custom_coins_v1';
@@ -441,16 +448,94 @@ export async function syncAndListCustomCoinsStatic(
   return includeDisabled ? evaluated : evaluated.filter((c) => c.enabled);
 }
 
+const LEGACY_CHART_KEY_PREFIXES = [
+  'zectrade_chart_v1',
+  'zectrade_chart_v2',
+  'zectrade_klines',
+  'zectrade_kline',
+];
+
+function buildChartCacheKey(symbol: string, timeframe: ChartTimeframe): string {
+  return `${CHART_CACHE_VERSION}_${symbol.toUpperCase().replace('/', '')}_${timeframe}`;
+}
+
+/**
+ * Purges all legacy chart cache keys (v1/v2) and any v3 cache entries whose
+ * historical candles contain consecutive flat bars (High === Low or identical closes).
+ */
+export function purgeStaleFlatCandleCaches(): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      if (LEGACY_CHART_KEY_PREFIXES.some((prefix) => k.startsWith(prefix))) {
+        keysToRemove.push(k);
+        continue;
+      }
+      if (k.startsWith(`${CHART_CACHE_VERSION}_`)) {
+        const raw = window.localStorage.getItem(k);
+        if (!raw) {
+          keysToRemove.push(k);
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(raw) as OhlcvCandle[];
+          if (!Array.isArray(parsed) || parsed.length < HISTORICAL_WAVE_CANDLES || hasFlatCandles(parsed)) {
+            keysToRemove.push(k);
+          }
+        } catch {
+          keysToRemove.push(k);
+        }
+      }
+    }
+    for (const key of keysToRemove) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage quota/security errors cleanly
+  }
+}
+
+export function readCachedChartCandlesStatic(
+  symbol: string,
+  timeframe: ChartTimeframe
+): OhlcvCandle[] | null {
+  purgeStaleFlatCandleCaches();
+  const key = buildChartCacheKey(symbol, timeframe);
+  const cached = readStorageJson<OhlcvCandle[]>(key);
+  if (!Array.isArray(cached) || cached.length < HISTORICAL_WAVE_CANDLES || hasFlatCandles(cached)) {
+    removeStorageKey(key);
+    return null;
+  }
+  return cached;
+}
+
+export function writeCachedChartCandlesStatic(
+  symbol: string,
+  timeframe: ChartTimeframe,
+  candles: OhlcvCandle[]
+): void {
+  if (!Array.isArray(candles) || candles.length < HISTORICAL_WAVE_CANDLES || hasFlatCandles(candles)) {
+    return;
+  }
+  writeStorageJson(buildChartCacheKey(symbol, timeframe), candles.slice(-500));
+}
+
 /**
  * Generates deterministic UTC-aligned OHLCV klines purely from the authoritative Firestore
- * coin (`basePrice`, `schedule`, `symbol`) and shared UTC timestamps so every connected device
- * sees the exact same chart candles and current close price without Math.random().
+ * coin (`basePrice`, `schedule`, `symbol`) and shared UTC candle timestamps:
+ * - Always generates at least 120 wave-patterned historical candles backwards from the
+ *   current live price using multi-frequency sine/cosine waves + seeded bodies & wicks.
+ * - Never emits flat historical bars and guarantees 100% cross-device chart sync.
  */
 export async function getCustomCoinKlinesStatic(
   rawSymbol: string,
   timeframe: ChartTimeframe,
-  limit = 360
+  limit = HISTORICAL_WAVE_CANDLES
 ): Promise<OhlcvCandle[]> {
+  purgeStaleFlatCandleCaches();
   const { symbol } = normalizeSymbolParts(rawSymbol);
   const coins = await syncAndListCustomCoinsStatic(true);
   const target = coins.find((c) => c.symbol === symbol);
@@ -459,57 +544,67 @@ export async function getCustomCoinKlinesStatic(
   const nowMs = Date.now();
   const utcSecMs = Math.floor(nowMs / 1000) * 1000;
   const liveCoin = evaluateCoinTick(target, utcSecMs, false).coin;
-  const safeLimit = Math.min(500, Math.max(60, Math.round(limit)));
+  const safeLimit = Math.min(500, Math.max(HISTORICAL_WAVE_CANDLES, Math.round(limit)));
+  const currentBucketStart = getCandleBucketStartMs(utcSecMs, timeframe);
 
-  const current1mBucket = getCandleBucketStartMs(utcSecMs, '1m');
-  const recent1mWindow = Math.min(
-    180,
-    Math.max(30, Math.ceil((TIMEFRAME_MS[timeframe] * 24) / 60_000))
+  const prevBucketEval = evaluateCoinTick(target, currentBucketStart - 1000, false).coin;
+  const histAnchorPrice =
+    Number.isFinite(prevBucketEval.currentPrice) && prevBucketEval.currentPrice > 0
+      ? prevBucketEval.currentPrice
+      : liveCoin.currentPrice;
+
+  const historicalBars = generateRealisticCandles(
+    symbol,
+    histAnchorPrice,
+    timeframe,
+    safeLimit - 1,
+    currentBucketStart - 1
   );
 
-  // Sample 1-minute buckets deterministically from the coin's shared basePrice & schedule
-  const deterministic1mBars: OhlcvCandle[] = [];
-  const sampleBaseCoin: AdminManagedCoin = {
-    ...target,
-    basePrice: target.basePrice ?? target.currentPrice,
-    schedule:
-      target.schedule && target.schedule.active
-        ? target.schedule
-        : null,
-  };
+  // Sample deterministic intra-bucket ticks from currentBucketStart to utcSecMs for realistic live wicks
+  const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? histAnchorPrice;
+  const liveClose = liveCoin.currentPrice;
+  let liveHigh = Math.max(liveOpen, liveClose);
+  let liveLow = Math.min(liveOpen, liveClose);
 
-  for (let idx = recent1mWindow - 1; idx >= 0; idx--) {
-    const bucketStart = current1mBucket - idx * 60_000;
-    const tOpen = evaluateCoinTick(sampleBaseCoin, bucketStart, false).coin.currentPrice;
-    const tQ1 = evaluateCoinTick(sampleBaseCoin, bucketStart + 15_000, false).coin.currentPrice;
-    const tQ2 = evaluateCoinTick(sampleBaseCoin, bucketStart + 30_000, false).coin.currentPrice;
-    const tQ3 = evaluateCoinTick(sampleBaseCoin, bucketStart + 45_000, false).coin.currentPrice;
-    const tClose =
-      idx === 0
-        ? liveCoin.currentPrice
-        : evaluateCoinTick(sampleBaseCoin, bucketStart + 59_000, false).coin.currentPrice;
-
-    const high = Math.max(tOpen, tQ1, tQ2, tQ3, tClose);
-    const low = Math.min(tOpen, tQ1, tQ2, tQ3, tClose);
-    const vol = Number((Math.max(12, Math.abs(tClose - tOpen) * 65 + 18)).toFixed(2));
-    deterministic1mBars.push({
-      time: bucketStart,
-      open: tOpen,
-      high,
-      low,
-      close: tClose,
-      volume: vol,
-    });
+  const elapsedMs = Math.max(0, utcSecMs - currentBucketStart);
+  for (const frac of [0.25, 0.5, 0.75]) {
+    const sampleTs = currentBucketStart + Math.floor((elapsedMs * frac) / 1000) * 1000;
+    const samplePrice = evaluateCoinTick(target, sampleTs, false).coin.currentPrice;
+    if (Number.isFinite(samplePrice) && samplePrice > 0) {
+      liveHigh = Math.max(liveHigh, samplePrice);
+      liveLow = Math.min(liveLow, samplePrice);
+    }
   }
 
-  return buildPersistentChartCandles(
-    symbol,
-    deterministic1mBars,
-    liveCoin.currentPrice,
-    timeframe,
-    safeLimit,
-    utcSecMs
-  );
+  const spreadFloor = liveClose * 0.0008;
+  if (liveHigh - liveLow < spreadFloor) {
+    liveHigh = Math.max(liveHigh, Math.max(liveOpen, liveClose) + spreadFloor * 0.5);
+    liveLow = Math.max(0.0001, Math.min(liveLow, Math.min(liveOpen, liveClose) - spreadFloor * 0.5));
+  }
+
+  const liveCandle: OhlcvCandle = {
+    time: currentBucketStart,
+    open: liveOpen,
+    high: liveHigh,
+    low: liveLow,
+    close: liveClose,
+    volume: Number((Math.max(18, Math.abs(liveClose - liveOpen) * 65 + 24)).toFixed(2)),
+  };
+
+  let series = [...historicalBars, liveCandle];
+  if (hasFlatCandles(series)) {
+    series = generateRealisticCandles(
+      symbol,
+      liveClose,
+      timeframe,
+      safeLimit,
+      currentBucketStart
+    );
+  }
+
+  writeCachedChartCandlesStatic(symbol, timeframe, series);
+  return series;
 }
 
 export async function upsertCustomCoinStatic(params: {

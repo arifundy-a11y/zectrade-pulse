@@ -9,11 +9,19 @@ import {
   getCoinTradeAnalyticsStatic,
   getCustomCoinKlinesStatic,
   getInitialAdminCoinsSync,
+  purgeStaleFlatCandleCaches,
+  readCachedChartCandlesStatic,
   recordCoinTradeStatic,
   syncAndListCustomCoinsStatic,
   updateCoinPriceControlStatic,
   upsertCustomCoinStatic,
+  writeCachedChartCandlesStatic,
 } from './coinsService';
+import {
+  CHART_CACHE_VERSION,
+  type ChartTimeframe,
+  hasFlatCandles,
+} from '../utils/chartEngine';
 import {
   executeDirectP2PTransfer,
   lookupTransferRecipientDirect,
@@ -205,10 +213,30 @@ describe('coinsService price control, klines, trades & analytics', () => {
     const listB = evaluateCustomCoinsForCurrentSecondStatic(false, sameSecLaterMs);
     assert.equal(listA[0].currentPrice, listB[0].currentPrice);
 
-    const klinesA = await getCustomCoinKlinesStatic('XUUSDT', '15m', 90);
-    const klinesB = await getCustomCoinKlinesStatic('XUUSDT', '15m', 90);
-    assert.equal(klinesA.length, 90);
+    const klinesA = await getCustomCoinKlinesStatic('XUUSDT', '15m', 120);
+    const klinesB = await getCustomCoinKlinesStatic('XUUSDT', '15m', 120);
+    assert.equal(klinesA.length, 120);
     assert.deepEqual(klinesA, klinesB);
+    assert.equal(hasFlatCandles(klinesA), false);
+
+    const allTimeframes: ChartTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1mo'];
+    for (const tf of allTimeframes) {
+      const bars = await getCustomCoinKlinesStatic('XUUSDT', tf, 60);
+      // Enforces minimum 120 historical wave candles even if smaller limit requested
+      assert.equal(bars.length, 120);
+      assert.equal(hasFlatCandles(bars), false);
+    }
+
+    // Verify stale flat cache is rejected and valid v3 wave cache is preserved
+    purgeStaleFlatCandleCaches();
+    writeCachedChartCandlesStatic('XUUSDT', '15m', klinesA);
+    const validCached = readCachedChartCandlesStatic('XUUSDT', '15m');
+    assert.ok(validCached && validCached.length === 120);
+    assert.equal(CHART_CACHE_VERSION, 'zectrade_chart_v3');
+
+    const shortFlat = klinesA.slice(0, 10).map((c) => ({ ...c, high: c.close, low: c.close }));
+    writeCachedChartCandlesStatic('ZECTESTUSDT', '15m', shortFlat);
+    assert.equal(readCachedChartCandlesStatic('ZECTESTUSDT', '15m'), null);
   });
 });
 

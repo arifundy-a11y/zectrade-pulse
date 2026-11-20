@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  CHART_CACHE_VERSION,
+  type ChartTimeframe,
+  HISTORICAL_WAVE_CANDLES,
   buildBinanceOrderBook,
   computeBollingerBands,
   computeCandleCutOffCountdown,
@@ -20,6 +23,7 @@ import {
   getBinanceKlineInterval,
   getBinanceKlineSymbol,
   getTickOptionsForPrice,
+  hasFlatCandles,
 } from './chartEngine';
 
 test('generateRealisticCandles anchors closing price smoothly to livePrice without price cliffs', () => {
@@ -205,4 +209,52 @@ test('computeVolumeMa and computeKdj compute accurate Binance sub-pane values', 
   assert.ok(kdj[17].k !== null && kdj[17].d !== null && kdj[17].j !== null);
   assert.ok(kdj[17].j! >= kdj[17].k!);
 });
+
+test('hasFlatCandles detects flat High===Low or identical closes and wave candles pass across all 8 timeframes', () => {
+  assert.equal(CHART_CACHE_VERSION, 'zectrade_chart_v3');
+  assert.equal(HISTORICAL_WAVE_CANDLES, 120);
+
+  // Flat High === Low bars detected
+  const flatHighLow = Array.from({ length: 120 }, (_, i) => ({
+    time: 1763140000000 + i * 60_000,
+    open: 100,
+    high: 100,
+    low: 100,
+    close: 100,
+    volume: 10,
+  }));
+  assert.equal(hasFlatCandles(flatHighLow), true);
+
+  // Consecutive identical closes detected even with small wicks
+  const identicalCloses = Array.from({ length: 120 }, (_, i) => ({
+    time: 1763140000000 + i * 60_000,
+    open: 100,
+    high: 100.2,
+    low: 99.8,
+    close: 100,
+    volume: 10,
+  }));
+  assert.equal(hasFlatCandles(identicalCloses), true);
+
+  const timeframes: ChartTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1mo'];
+  for (const tf of timeframes) {
+    const waveA = generateRealisticCandles('XUUSDT', 100, tf, 120, 1763140000000);
+    const waveB = generateRealisticCandles('XUUSDT', 100, tf, 120, 1763140000000);
+    assert.equal(waveA.length, 120);
+    assert.deepEqual(waveA, waveB);
+    assert.equal(hasFlatCandles(waveA), false);
+
+    let hasBull = false;
+    let hasBear = false;
+    for (let i = 0; i < waveA.length - 1; i++) {
+      const c = waveA[i];
+      assert.ok(c.high > Math.max(c.open, c.close), `expected upper wick on ${tf} bar ${i}`);
+      assert.ok(c.low < Math.min(c.open, c.close), `expected lower wick on ${tf} bar ${i}`);
+      if (c.close > c.open) hasBull = true;
+      if (c.close < c.open) hasBear = true;
+    }
+    assert.ok(hasBull && hasBear, `expected both bullish and bearish wave bars on ${tf}`);
+  }
+});
+
 
