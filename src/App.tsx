@@ -13,6 +13,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
   onSnapshot,
   query,
@@ -278,7 +279,6 @@ export default function App() {
   const pendingWalletDeltasRef = useRef(0);
   const seenSqlTransferIdsRef = useRef<Set<string>>(new Set());
   const initialWalletSyncDoneRef = useRef(false);
-  const lastFirestoreSyncedBalRef = useRef<{ uid: string; real: number; demo: number } | null>(null);
 
   // Modal States
   const [swapModalState, setSwapModalState] = useState<{
@@ -389,60 +389,36 @@ export default function App() {
   const syncWalletFromServer = useCallback(
     async (opts?: { tokenOverride?: string | null; force?: boolean; silent?: boolean }) => {
       const token = opts?.tokenOverride !== undefined ? opts.tokenOverride : authTokenRef.current;
-      if (!token) return;
+      if (!token && stateRef.current.user.isLocalDemoSession) return;
       if (stateRef.current.user.isLocalDemoSession && !opts?.tokenOverride) return;
       if (!opts?.force && pendingWalletDeltasRef.current > 0) return;
 
       try {
         const activeUid = stateRef.current.user.uid;
+        if (!activeUid) return;
         const { member: syncData, activity } = await getMemberWalletSyncStatic(activeUid);
-        if (!syncData) return;
+        if (syncData) {
+          const srvReal = Number(syncData.realBalance);
+          const srvDemo = Number(syncData.demoBalance);
 
-        const srvReal = Number(syncData.realBalance);
-        const srvDemo = Number(syncData.demoBalance);
-
-        setUser((prev) => {
-          const nextUser: UserProfile = {
-            ...prev,
-            realBalance: Number.isFinite(srvReal) ? srvReal : prev.realBalance,
-            demoBalance: Number.isFinite(srvDemo) ? srvDemo : prev.demoBalance,
-            pin:
-              typeof syncData.securityPin === 'string' && /^\d{4}$/.test(syncData.securityPin)
-                ? syncData.securityPin
-                : prev.pin,
-            hasDepositedBefore: Boolean(syncData.hasDepositedBefore),
-            hasTradedAfterDeposit: Boolean(syncData.hasTradedAfterDeposit),
-            withdrawLockClearedByAdmin: Boolean(syncData.withdrawLockClearedByAdmin),
-            isWithdrawBlocked: Boolean(syncData.isWithdrawBlocked),
-            isBlocked: Boolean(syncData.isBlocked),
-          };
-          stateRef.current.user = nextUser;
-          return nextUser;
-        });
-
-        if (
-          isFirebaseConfigured &&
-          db &&
-          auth?.currentUser &&
-          auth.currentUser.uid === activeUid
-        ) {
-          const prevSynced = lastFirestoreSyncedBalRef.current;
-          if (
-            !prevSynced ||
-            prevSynced.uid !== auth.currentUser.uid ||
-            prevSynced.real !== srvReal ||
-            prevSynced.demo !== srvDemo
-          ) {
-            lastFirestoreSyncedBalRef.current = {
-              uid: auth.currentUser.uid,
-              real: srvReal,
-              demo: srvDemo,
+          setUser((prev) => {
+            const nextUser: UserProfile = {
+              ...prev,
+              realBalance: Number.isFinite(srvReal) ? srvReal : prev.realBalance,
+              demoBalance: Number.isFinite(srvDemo) ? srvDemo : prev.demoBalance,
+              pin:
+                typeof syncData.securityPin === 'string' && /^\d{4}$/.test(syncData.securityPin)
+                  ? syncData.securityPin
+                  : prev.pin,
+              hasDepositedBefore: Boolean(syncData.hasDepositedBefore),
+              hasTradedAfterDeposit: Boolean(syncData.hasTradedAfterDeposit),
+              withdrawLockClearedByAdmin: Boolean(syncData.withdrawLockClearedByAdmin),
+              isWithdrawBlocked: Boolean(syncData.isWithdrawBlocked),
+              isBlocked: Boolean(syncData.isBlocked),
             };
-            updateDoc(doc(db, 'users', auth.currentUser.uid), {
-              realBalance: srvReal,
-              demoBalance: srvDemo,
-            }).catch(() => {});
-          }
+            stateRef.current.user = nextUser;
+            return nextUser;
+          });
         }
 
         if (Array.isArray(activity) && activity.length > 0) {
@@ -462,7 +438,9 @@ export default function App() {
           setWalletTransactions((prev) => deduplicateFirestoreAgainstSql(activity, prev));
         }
       } catch {
-        // Keep current state cleanly
+        if (!opts?.silent) {
+          showToast('Unable to refresh wallet balance right now.', 'error');
+        }
       }
     },
     [showToast]
@@ -511,16 +489,12 @@ export default function App() {
 
   // Firebase Auth listener
   useEffect(() => {
-    let unsubUser: (() => void) | null = null;
     let unsubPos: (() => void) | null = null;
     let unsubOrd: (() => void) | null = null;
-    let unsubTx: (() => void) | null = null;
 
     const handleFirebaseUser = async (fbUser: import('firebase/auth').User | null) => {
-      if (unsubUser) unsubUser();
       if (unsubPos) unsubPos();
       if (unsubOrd) unsubOrd();
-      if (unsubTx) unsubTx();
 
       if (!fbUser) return;
 
@@ -540,7 +514,8 @@ export default function App() {
         let data: Record<string, unknown> = {};
         if (isFirebaseConfigured && db) {
           try {
-            const snap = await getDoc(doc(db, 'users', fbUser.uid));
+            const userRef = doc(db, 'users', fbUser.uid);
+            const snap = await getDocFromServer(userRef).catch(() => getDoc(userRef));
             if (snap.exists()) data = snap.data();
           } catch {
             // Use synced local profile when offline
@@ -549,7 +524,7 @@ export default function App() {
 
         if (data.isBlocked || syncedMember.isBlocked) {
           if (auth) await signOut(auth).catch(() => {});
-          if (oauthAuth) await signOut(oauthAuth).catch(() => {});
+          if (oauthAuth && oauthAuth !== auth) await signOut(oauthAuth).catch(() => {});
           setAuthToken(null);
           showToast('Your account is currently restricted. Please contact support.', 'error');
           return;
@@ -582,8 +557,8 @@ export default function App() {
           withdrawLockClearedByAdmin: Boolean(
             data.withdrawLockClearedByAdmin ?? syncedMember.withdrawLockClearedByAdmin
           ),
-          demoBalance: initialDemo,
-          realBalance: initialReal,
+          demoBalance: Number.isFinite(initialDemo) ? initialDemo : 100000,
+          realBalance: Number.isFinite(initialReal) ? initialReal : FIRST_REGISTER_REAL_BONUS_USD,
           spotHoldings: (data.spotHoldings as UserProfile['spotHoldings']) || {},
           avatarUrl: (data.avatarUrl as string | null | undefined) ?? syncedMember.avatarUrl ?? null,
           fullName: (data.fullName as string | null | undefined) ?? syncedMember.fullName ?? null,
@@ -602,75 +577,29 @@ export default function App() {
         });
 
         if (isFirebaseConfigured && db) {
-          const userRef = doc(db, 'users', fbUser.uid);
-          unsubUser = onSnapshot(userRef, (dSnap) => {
-            if (!dSnap.exists()) return;
-            const d = dSnap.data();
-            setUser((prev) => ({
-              ...prev,
-              username: d.username ?? prev.username,
-              role: (d.role as UserRole) || prev.role,
-              realBalance: typeof d.realBalance === 'number' ? d.realBalance : prev.realBalance,
-              demoBalance: typeof d.demoBalance === 'number' ? d.demoBalance : prev.demoBalance,
-              hasDepositedBefore:
-                typeof d.hasDepositedBefore === 'boolean' ? d.hasDepositedBefore : prev.hasDepositedBefore,
-              hasTradedAfterDeposit:
-                typeof d.hasTradedAfterDeposit === 'boolean'
-                  ? d.hasTradedAfterDeposit
-                  : prev.hasTradedAfterDeposit,
-              withdrawLockClearedByAdmin:
-                typeof d.withdrawLockClearedByAdmin === 'boolean'
-                  ? d.withdrawLockClearedByAdmin
-                  : prev.withdrawLockClearedByAdmin,
-              isWithdrawBlocked:
-                typeof d.isWithdrawBlocked === 'boolean' ? d.isWithdrawBlocked : prev.isWithdrawBlocked,
-              spotHoldings: d.spotHoldings || {},
-              avatarUrl: d.avatarUrl !== undefined ? d.avatarUrl : prev.avatarUrl,
-              fullName: d.fullName !== undefined ? d.fullName : prev.fullName,
-              phone: d.phone !== undefined ? d.phone : prev.phone,
-              country: d.country !== undefined ? d.country : prev.country,
-              bio: d.bio !== undefined ? d.bio : prev.bio,
-              withdrawMethod: (d.withdrawMethod as WithdrawMethod | undefined) ?? prev.withdrawMethod,
-              withdrawAccountName:
-                d.withdrawAccountName !== undefined ? d.withdrawAccountName : prev.withdrawAccountName,
-              withdrawAccountNumber:
-                d.withdrawAccountNumber !== undefined ? d.withdrawAccountNumber : prev.withdrawAccountNumber,
-            }));
-          });
+          unsubPos = onSnapshot(
+            collection(db, 'users', fbUser.uid, 'positions'),
+            (qSnap) => {
+              setActivePositions(
+                qSnap.docs
+                  .filter((d) => !settledIdsRef.current.has(d.id))
+                  .map((d) => ({ id: d.id, ...d.data() } as Position))
+              );
+            },
+            () => {
+              // Ignore listener permission/offline errors gracefully
+            }
+          );
 
-          unsubPos = onSnapshot(collection(db, 'users', fbUser.uid, 'positions'), (qSnap) => {
-            setActivePositions(
-              qSnap.docs
-                .filter((d) => !settledIdsRef.current.has(d.id))
-                .map((d) => ({ id: d.id, ...d.data() } as Position))
-            );
-          });
-
-          unsubOrd = onSnapshot(collection(db, 'users', fbUser.uid, 'orders'), (qSnap) => {
-            setPreOrders(qSnap.docs.map((d) => ({ id: d.id, ...d.data() } as PreOrder)));
-          });
-
-          unsubTx = onSnapshot(collection(db, 'users', fbUser.uid, 'transactions'), (qSnap) => {
-            const list: WalletTransaction[] = qSnap.docs.map((d) => {
-              const raw = d.data();
-              const dt = raw.createdAt?.toDate ? raw.createdAt.toDate() : new Date();
-              return {
-                id: d.id,
-                type: raw.type || 'TX',
-                amount: Number(raw.amount || 0),
-                target: raw.target || 'System Wallet',
-                isAdjustment: Boolean(raw.isAdjustment),
-                status: raw.status || 'PENDING',
-                rejectReason: raw.rejectReason || null,
-                rawTime: dt.getTime(),
-                timestamp: dt.toLocaleString(),
-              };
-            });
-            setWalletTransactions((prev) => {
-              const localMerged = prev.filter((t) => t.id.startsWith('adj-') || t.id.startsWith('ref-') || t.id.startsWith('p2p-'));
-              return deduplicateFirestoreAgainstSql(localMerged, list);
-            });
-          });
+          unsubOrd = onSnapshot(
+            collection(db, 'users', fbUser.uid, 'orders'),
+            (qSnap) => {
+              setPreOrders(qSnap.docs.map((d) => ({ id: d.id, ...d.data() } as PreOrder)));
+            },
+            () => {
+              // Ignore listener permission/offline errors gracefully
+            }
+          );
         }
 
         await syncWalletFromServer({ tokenOverride: idToken, force: true, silent: true });
@@ -685,24 +614,140 @@ export default function App() {
     return () => {
       unsubAuth();
       unsubOAuth();
-      if (unsubUser) unsubUser();
       if (unsubPos) unsubPos();
       if (unsubOrd) unsubOrd();
-      if (unsubTx) unsubTx();
     };
   }, [showToast, syncWalletFromServer]);
 
-  // Poll authoritative wallet state every 4s so live incoming P2P transfers & approvals deliver automatically
+  // Real-time Firestore listener (onSnapshot) for active user's balance & wallet history (always active on Account page & live sessions)
   useEffect(() => {
-    if (!user.isLoggedIn || user.isLocalDemoSession || !authToken) return;
+    if (!user.isLoggedIn || user.isLocalDemoSession || !user.uid) return;
+    if (!isFirebaseConfigured || !db) return;
+
+    const userRef = doc(db, 'users', user.uid);
+    const unsubUser = onSnapshot(
+      userRef,
+      (dSnap) => {
+        if (!dSnap.exists()) return;
+        const d = dSnap.data() as Record<string, unknown>;
+        const parsedReal = Number(d.realBalance);
+        const parsedDemo = Number(d.demoBalance);
+        setUser((prev) => {
+          if (prev.uid !== user.uid) return prev;
+          const nextUser: UserProfile = {
+            ...prev,
+            username: d.username ? String(d.username) : prev.username,
+            role: (d.role as UserRole) || prev.role,
+            pin:
+              typeof d.securityPin === 'string' && /^\d{4}$/.test(d.securityPin)
+                ? d.securityPin
+                : prev.pin,
+            realBalance: Number.isFinite(parsedReal) ? parsedReal : prev.realBalance,
+            demoBalance: Number.isFinite(parsedDemo) ? parsedDemo : prev.demoBalance,
+            hasDepositedBefore:
+              typeof d.hasDepositedBefore === 'boolean' ? d.hasDepositedBefore : prev.hasDepositedBefore,
+            hasTradedAfterDeposit:
+              typeof d.hasTradedAfterDeposit === 'boolean'
+                ? d.hasTradedAfterDeposit
+                : prev.hasTradedAfterDeposit,
+            withdrawLockClearedByAdmin:
+              typeof d.withdrawLockClearedByAdmin === 'boolean'
+                ? d.withdrawLockClearedByAdmin
+                : prev.withdrawLockClearedByAdmin,
+            isWithdrawBlocked:
+              typeof d.isWithdrawBlocked === 'boolean' ? d.isWithdrawBlocked : prev.isWithdrawBlocked,
+            isBlocked: typeof d.isBlocked === 'boolean' ? d.isBlocked : prev.isBlocked,
+            spotHoldings: (d.spotHoldings as UserProfile['spotHoldings']) || prev.spotHoldings || {},
+            avatarUrl: d.avatarUrl !== undefined ? (d.avatarUrl as string | null) : prev.avatarUrl,
+            fullName: d.fullName !== undefined ? (d.fullName as string | null) : prev.fullName,
+            phone: d.phone !== undefined ? (d.phone as string | null) : prev.phone,
+            country: d.country !== undefined ? (d.country as string | null) : prev.country,
+            bio: d.bio !== undefined ? (d.bio as string | null) : prev.bio,
+            withdrawMethod: (d.withdrawMethod as WithdrawMethod | undefined) ?? prev.withdrawMethod,
+            withdrawAccountName:
+              d.withdrawAccountName !== undefined
+                ? (d.withdrawAccountName as string | null)
+                : prev.withdrawAccountName,
+            withdrawAccountNumber:
+              d.withdrawAccountNumber !== undefined
+                ? (d.withdrawAccountNumber as string | null)
+                : prev.withdrawAccountNumber,
+          };
+          stateRef.current.user = nextUser;
+          return nextUser;
+        });
+      },
+      () => {
+        // Fallback cache / manual Refresh sync remains active if Firestore rules block unauthenticated listener
+      }
+    );
+
+    const txRef = collection(db, 'users', user.uid, 'transactions');
+    const unsubTx = onSnapshot(
+      txRef,
+      (qSnap) => {
+        const list: WalletTransaction[] = qSnap.docs.map((d) => {
+          const raw = d.data() as Record<string, unknown>;
+          const createdAtField = raw.createdAt as { toDate?: () => Date } | undefined;
+          const createdAtMs =
+            typeof raw.createdAtMs === 'number' && Number.isFinite(raw.createdAtMs)
+              ? raw.createdAtMs
+              : createdAtField?.toDate
+                ? createdAtField.toDate().getTime()
+                : Date.now();
+          return {
+            id: String(raw.id || d.id),
+            userId: raw.userId ? String(raw.userId) : user.uid,
+            userEmail: raw.userEmail ? String(raw.userEmail) : user.email,
+            type: String(raw.type || 'TX'),
+            amount: Number(raw.amount || 0),
+            target: String(raw.target || 'System Wallet'),
+            isAdjustment: Boolean(raw.isAdjustment),
+            status: (raw.status as WalletTransaction['status']) || 'PENDING',
+            rejectReason: raw.rejectReason ? String(raw.rejectReason) : null,
+            rawTime: createdAtMs,
+            timestamp: new Date(createdAtMs).toLocaleString(),
+          };
+        });
+
+        const newIncoming = list.filter(
+          (tx) =>
+            tx.type.includes('RECEIVED') && !seenSqlTransferIdsRef.current.has(tx.id)
+        );
+        if (initialWalletSyncDoneRef.current && newIncoming.length > 0) {
+          for (const inc of newIncoming) {
+            showToast(`Received $${inc.amount.toFixed(2)} transfer (${inc.target})!`);
+          }
+        }
+        for (const row of list) {
+          seenSqlTransferIdsRef.current.add(row.id);
+        }
+        initialWalletSyncDoneRef.current = true;
+
+        setWalletTransactions((prev) => deduplicateFirestoreAgainstSql(list, prev));
+      },
+      () => {
+        // Fallback cache / manual Refresh sync remains active if Firestore rules block unauthenticated listener
+      }
+    );
+
+    return () => {
+      unsubUser();
+      unsubTx();
+    };
+  }, [user.isLoggedIn, user.isLocalDemoSession, user.uid, user.email, showToast]);
+
+  // Fetch authoritative user doc & transactions immediately upon visiting Account page & poll periodically
+  useEffect(() => {
+    if (!user.isLoggedIn || user.isLocalDemoSession) return;
     if (activeSection === 'profile') {
-      syncWalletFromServer({ force: true, silent: true });
+      syncWalletFromServer({ tokenOverride: authTokenRef.current || 'firestore-sync', force: true, silent: true });
     }
     const id = setInterval(() => {
       syncWalletFromServer({ silent: true });
-    }, 4000);
+    }, 8000);
     return () => clearInterval(id);
-  }, [user.isLoggedIn, user.isLocalDemoSession, authToken, activeSection, syncWalletFromServer]);
+  }, [user.isLoggedIn, user.isLocalDemoSession, user.uid, activeSection, syncWalletFromServer]);
 
   // Live Market Ticker (Binance REST Snapshot + WebSocket + Smooth Fallback Simulation)
   useEffect(() => {
@@ -1952,7 +1997,6 @@ export default function App() {
     seenSqlTransferIdsRef.current.clear();
     initialWalletSyncDoneRef.current = false;
     pendingWalletDeltasRef.current = 0;
-    lastFirestoreSyncedBalRef.current = null;
     setAuthToken(null);
     authTokenRef.current = null;
     setUser(DEMO_USER_TEMPLATE);
@@ -2055,9 +2099,11 @@ export default function App() {
       if (payload.mode === 'register') {
         const cred = await createUserWithEmailAndPassword(auth, payload.email, payload.password);
         const name = payload.username || payload.email.split('@')[0];
+        const cleanRegEmail = payload.email.trim().toLowerCase();
         await setDoc(doc(db, 'users', cred.user.uid), {
+          uid: cred.user.uid,
           username: name,
-          email: payload.email.toLowerCase(),
+          email: cleanRegEmail,
           role: 'user',
           securityPin: '1234',
           isBlocked: false,
@@ -2073,12 +2119,13 @@ export default function App() {
         });
         await addDoc(collection(db, 'users', cred.user.uid, 'transactions'), {
           userId: cred.user.uid,
-          userEmail: payload.email.toLowerCase(),
+          userEmail: cleanRegEmail,
           type: 'SIGN-UP WELCOME BONUS',
           amount: FIRST_REGISTER_REAL_BONUS_USD,
           target: 'Real Account ($2 Bonus)',
           isAdjustment: true,
           status: 'SUCCESS',
+          createdAtMs: Date.now(),
           createdAt: serverTimestamp(),
         });
         showToast('Account registered! $2.00 Real bonus credited (deposit & trade required to withdraw).');
@@ -2590,6 +2637,7 @@ export default function App() {
     const result = await executeP2PTransferStatic({
       senderUid: user.uid,
       senderEmail: user.email,
+      senderUsername: user.username,
       recipientIdentifier: recipient,
       accountMode,
       amount,
@@ -2636,53 +2684,8 @@ export default function App() {
       })
     );
 
-    const targetLabel = `${resolvedRecipient.username} (${resolvedRecipient.uid})`;
-    setWalletTransactions((prev) => [
-      {
-        id: `${Date.now()}-p2p`,
-        userId: user.uid,
-        userEmail: user.email,
-        type: `P2P TRANSFER SENT (${accountMode.toUpperCase()})`,
-        amount,
-        target: targetLabel,
-        status: 'SUCCESS',
-        timestamp: new Date().toLocaleString(),
-        rawTime: Date.now(),
-      },
-      ...prev,
-    ]);
-
-    if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
-      const balField = accountMode === 'demo' ? 'demoBalance' : 'realBalance';
-      try {
-        await updateDoc(doc(db, 'users', auth.currentUser.uid), {
-          [balField]: nextSenderBalance,
-        });
-        await addDoc(collection(db, 'users', auth.currentUser.uid, 'transactions'), {
-          userId: auth.currentUser.uid,
-          userEmail: user.email,
-          type: `P2P TRANSFER SENT (${accountMode.toUpperCase()})`,
-          amount,
-          target: targetLabel,
-          status: 'SUCCESS',
-          createdAt: serverTimestamp(),
-        });
-      } catch {
-        // Local storage already persisted cleanly
-      }
-      updateDoc(doc(db, 'users', resolvedRecipient.uid), {
-        [balField]: nextRecipientBalance,
-      }).catch(() => {});
-      addDoc(collection(db, 'users', resolvedRecipient.uid, 'transactions'), {
-        userId: resolvedRecipient.uid,
-        userEmail: resolvedRecipient.email,
-        type: `P2P TRANSFER RECEIVED (${accountMode.toUpperCase()})`,
-        amount,
-        target: `${user.username} (${user.uid})`,
-        status: 'SUCCESS',
-        createdAt: serverTimestamp(),
-      }).catch(() => {});
-    }
+    seenSqlTransferIdsRef.current.add(result.sentTransaction.id);
+    setWalletTransactions((prev) => deduplicateFirestoreAgainstSql([result.sentTransaction], prev));
 
     showToast(`Transferred $${amount.toFixed(2)} to ${resolvedRecipient.username} (${resolvedRecipient.uid}).`);
     return { ok: true };
@@ -2780,7 +2783,6 @@ export default function App() {
     seenSqlTransferIdsRef.current.clear();
     initialWalletSyncDoneRef.current = false;
     pendingWalletDeltasRef.current = 0;
-    lastFirestoreSyncedBalRef.current = null;
     setAuthToken(null);
     authTokenRef.current = null;
     setUser({ ...DEMO_USER_TEMPLATE, isLoggedIn: false });
@@ -3464,7 +3466,11 @@ export default function App() {
               transactions={walletTransactions}
               csrTelegramLink={csrTelegramLink}
               onRefresh={async () => {
-                await syncWalletFromServer({ force: true, silent: true });
+                await syncWalletFromServer({
+                  tokenOverride: authTokenRef.current || 'firestore-sync',
+                  force: true,
+                  silent: false,
+                });
                 showToast('Balances synchronized.');
               }}
               onResetDemo={() => {

@@ -3,8 +3,11 @@ import {
   collection,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
+  getDocsFromServer,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -27,6 +30,7 @@ import type {
   WalletTransaction,
   WithdrawMethod,
 } from '../types';
+import { deduplicateFirestoreAgainstSql } from '../utils/depositHistory';
 import { FIRST_REGISTER_REAL_BONUS_USD } from '../utils/tradingEngine';
 import { calculatePostTransferBalances, roundUsd2 } from '../utils/transferEngine';
 import { db, isFirebaseConfigured } from './firebaseClient';
@@ -110,8 +114,10 @@ export function getMemberActivitySync(uid: string): WalletTransaction[] {
 }
 
 function normalizeMemberDoc(id: string, d: Record<string, unknown>): ManagedMember {
+  const parsedReal = Number(d.realBalance);
+  const parsedDemo = Number(d.demoBalance);
   return {
-    uid: String(d.uid || id),
+    uid: String(id || d.uid || ''),
     username: String(d.username || 'Trader'),
     email: String(d.email || ''),
     role: (d.role as UserRole) || 'user',
@@ -120,8 +126,8 @@ function normalizeMemberDoc(id: string, d: Record<string, unknown>): ManagedMemb
     hasDepositedBefore: Boolean(d.hasDepositedBefore),
     hasTradedAfterDeposit: Boolean(d.hasTradedAfterDeposit),
     withdrawLockClearedByAdmin: Boolean(d.withdrawLockClearedByAdmin),
-    realBalance: Number(d.realBalance ?? 0),
-    demoBalance: Number(d.demoBalance ?? 100000),
+    realBalance: Number.isFinite(parsedReal) ? parsedReal : 0,
+    demoBalance: Number.isFinite(parsedDemo) ? parsedDemo : 100000,
     securityPin: d.securityPin ? String(d.securityPin) : '1234',
     invitedBy: d.invitedBy ? String(d.invitedBy) : null,
     avatarUrl: d.avatarUrl ? String(d.avatarUrl) : null,
@@ -135,12 +141,110 @@ function normalizeMemberDoc(id: string, d: Record<string, unknown>): ManagedMemb
   };
 }
 
+function upsertMemberInLocalCache(member: ManagedMember): void {
+  const members = readStoredMembers();
+  const next = members.some((m) => m.uid === member.uid)
+    ? members.map((m) => (m.uid === member.uid ? member : m))
+    : [member, ...members];
+  saveStoredMembers(next);
+}
+
 function findMemberInList(list: ManagedMember[], identifier: string): ManagedMember | undefined {
   const q = identifier.trim().toLowerCase();
   if (!q) return undefined;
   return list.find(
-    (m) => m.uid.toLowerCase() === q || m.email.toLowerCase() === q
+    (m) => m.uid.trim().toLowerCase() === q || m.email.trim().toLowerCase() === q
   );
+}
+
+async function getUserDocFromFirestore(uid: string) {
+  if (!isFirebaseConfigured || !db) return null;
+  const ref = doc(db, 'users', uid);
+  try {
+    return await getDocFromServer(ref);
+  } catch {
+    return await getDoc(ref);
+  }
+}
+
+async function getQueryFromFirestore<T>(qRef: Parameters<typeof getDocs>[0]) {
+  try {
+    return await getDocsFromServer(qRef as never);
+  } catch {
+    return await getDocs(qRef as never);
+  }
+}
+
+async function findMemberDocInFirestore(identifier: string): Promise<ManagedMember | null> {
+  if (!isFirebaseConfigured || !db) return null;
+  const trimmed = identifier.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+
+  // 1. Direct document ID lookup (UID == docSnap.id)
+  try {
+    const directSnap = await getUserDocFromFirestore(trimmed);
+    if (directSnap && directSnap.exists()) {
+      const parsed = normalizeMemberDoc(directSnap.id, directSnap.data());
+      upsertMemberInLocalCache(parsed);
+      return parsed;
+    }
+  } catch {
+    // Continue to query strategies
+  }
+
+  // 2. Indexed email queries (lowercase and exact input casing)
+  const emailCandidates = Array.from(new Set([lower, trimmed]));
+  for (const candidate of emailCandidates) {
+    try {
+      const snap = await getQueryFromFirestore(
+        query(collection(db, 'users'), where('email', '==', candidate))
+      );
+      if (!snap.empty) {
+        const firstDoc = snap.docs[0];
+        const parsed = normalizeMemberDoc(firstDoc.id, firstDoc.data() as Record<string, unknown>);
+        upsertMemberInLocalCache(parsed);
+        return parsed;
+      }
+    } catch {
+      // Continue
+    }
+  }
+
+  // 3. Indexed uid field query
+  try {
+    const uidSnap = await getQueryFromFirestore(
+      query(collection(db, 'users'), where('uid', '==', trimmed))
+    );
+    if (!uidSnap.empty) {
+      const firstDoc = uidSnap.docs[0];
+      const parsed = normalizeMemberDoc(firstDoc.id, firstDoc.data() as Record<string, unknown>);
+      upsertMemberInLocalCache(parsed);
+      return parsed;
+    }
+  } catch {
+    // Continue
+  }
+
+  // 4. Case-insensitive scan across users collection (handles mixed-case stored emails/UIDs)
+  try {
+    const allSnap = await getQueryFromFirestore(collection(db, 'users'));
+    for (const docSnap of allSnap.docs) {
+      const raw = docSnap.data() as Record<string, unknown>;
+      const docIdLower = docSnap.id.trim().toLowerCase();
+      const fieldUidLower = String(raw.uid || '').trim().toLowerCase();
+      const fieldEmailLower = String(raw.email || '').trim().toLowerCase();
+      if (docIdLower === lower || fieldUidLower === lower || fieldEmailLower === lower) {
+        const parsed = normalizeMemberDoc(docSnap.id, raw);
+        upsertMemberInLocalCache(parsed);
+        return parsed;
+      }
+    }
+  } catch {
+    // Rules may restrict full collection scan cleanly
+  }
+
+  return null;
 }
 
 async function mirrorMemberToFirestore(member: ManagedMember): Promise<void> {
@@ -172,13 +276,10 @@ export async function authenticateStaticAdmin(
 
   if (isFirebaseConfigured && db) {
     try {
-      const snap = await getDoc(doc(db, 'users', adminMember.uid));
-      if (snap.exists()) {
+      const snap = await getUserDocFromFirestore(adminMember.uid);
+      if (snap && snap.exists()) {
         adminMember = normalizeMemberDoc(snap.id, snap.data());
-        const updated = readStoredMembers().map((m) =>
-          m.uid === adminMember.uid ? adminMember : m
-        );
-        saveStoredMembers(updated);
+        upsertMemberInLocalCache(adminMember);
       } else {
         await mirrorMemberToFirestore(adminMember);
       }
@@ -208,8 +309,8 @@ export async function syncMemberOnAuthStatic(params: {
 
   if (isFirebaseConfigured && db) {
     try {
-      const snap = await getDoc(doc(db, 'users', params.uid));
-      if (snap.exists()) {
+      const snap = await getUserDocFromFirestore(params.uid);
+      if (snap && snap.exists()) {
         member = normalizeMemberDoc(snap.id, snap.data());
       }
     } catch {
@@ -234,19 +335,16 @@ export async function syncMemberOnAuthStatic(params: {
       invitedBy: null,
       withdrawMethod: 'kpay',
     };
-    saveStoredMembers([member, ...members]);
+    upsertMemberInLocalCache(member);
     await mirrorMemberToFirestore(member);
   } else {
     const updated: ManagedMember = {
       ...member,
+      uid: params.uid,
       email: cleanEmail || member.email,
       role: member.role === 'admin' || defaultRole === 'admin' ? 'admin' : member.role,
     };
-    saveStoredMembers(
-      members.some((m) => m.uid === updated.uid)
-        ? members.map((m) => (m.uid === updated.uid ? updated : m))
-        : [updated, ...members]
-    );
+    upsertMemberInLocalCache(updated);
     member = updated;
   }
 
@@ -291,25 +389,54 @@ export async function getMemberWalletSyncStatic(uid: string): Promise<{
   activity: WalletTransaction[];
 }> {
   let member = readStoredMembers().find((m) => m.uid === uid) ?? null;
+  let firestoreTx: WalletTransaction[] = [];
+
   if (isFirebaseConfigured && db) {
     try {
-      const snap = await getDoc(doc(db, 'users', uid));
-      if (snap.exists()) {
+      const snap = await getUserDocFromFirestore(uid);
+      if (snap && snap.exists()) {
         member = normalizeMemberDoc(snap.id, snap.data());
-        const members = readStoredMembers();
-        saveStoredMembers(
-          members.some((m) => m.uid === uid)
-            ? members.map((m) => (m.uid === uid ? member! : m))
-            : [member, ...members]
-        );
+        upsertMemberInLocalCache(member);
       }
     } catch {
       // Fallback to local
     }
+
+    try {
+      const txSnap = await getQueryFromFirestore(collection(db, 'users', uid, 'transactions'));
+      firestoreTx = txSnap.docs.map((txDoc) => {
+        const raw = txDoc.data() as Record<string, unknown>;
+        const createdAtField = raw.createdAt as { toDate?: () => Date } | undefined;
+        const createdAtMs =
+          typeof raw.createdAtMs === 'number' && Number.isFinite(raw.createdAtMs)
+            ? raw.createdAtMs
+            : createdAtField?.toDate
+              ? createdAtField.toDate().getTime()
+              : Date.now();
+        return {
+          id: String(raw.id || txDoc.id),
+          userId: raw.userId ? String(raw.userId) : uid,
+          userEmail: raw.userEmail ? String(raw.userEmail) : member?.email,
+          type: String(raw.type || 'TX'),
+          amount: Number(raw.amount || 0),
+          target: String(raw.target || 'System Wallet'),
+          isAdjustment: Boolean(raw.isAdjustment),
+          status: (raw.status as WalletTransaction['status']) || 'PENDING',
+          rejectReason: raw.rejectReason ? String(raw.rejectReason) : null,
+          rawTime: createdAtMs,
+          timestamp: new Date(createdAtMs).toLocaleString(),
+        };
+      });
+    } catch {
+      // Fallback to local activity cleanly
+    }
   }
+
+  const localActivity = getMemberActivitySync(uid);
+  const mergedActivity = deduplicateFirestoreAgainstSql(firestoreTx, localActivity);
   return {
     member,
-    activity: getMemberActivitySync(uid),
+    activity: mergedActivity,
   };
 }
 
@@ -323,6 +450,17 @@ export async function applyWalletDeltaStatic(params: {
   if (!Number.isFinite(params.delta)) return null;
   const members = readStoredMembers();
   let target = members.find((m) => m.uid === params.uid);
+  if (isFirebaseConfigured && db) {
+    try {
+      const snap = await getUserDocFromFirestore(params.uid);
+      if (snap && snap.exists()) {
+        target = normalizeMemberDoc(snap.id, snap.data());
+        upsertMemberInLocalCache(target);
+      }
+    } catch {
+      // Fall back to local target
+    }
+  }
   if (!target && params.email) {
     target = await syncMemberOnAuthStatic({ uid: params.uid, email: params.email });
   }
@@ -346,9 +484,7 @@ export async function applyWalletDeltaStatic(params: {
       : target.hasTradedAfterDeposit,
   };
 
-  saveStoredMembers(
-    readStoredMembers().map((m) => (m.uid === updated.uid ? updated : m))
-  );
+  upsertMemberInLocalCache(updated);
 
   if (isFirebaseConfigured && db) {
     try {
@@ -852,6 +988,18 @@ export async function lookupTransferRecipientStatic(
 ): Promise<{ uid: string; username: string; email: string } | null> {
   const trimmed = identifier.trim();
   if (!trimmed) return null;
+
+  if (isFirebaseConfigured && db) {
+    const fsMatch = await findMemberDocInFirestore(trimmed);
+    if (fsMatch) {
+      return {
+        uid: fsMatch.uid,
+        username: fsMatch.username,
+        email: fsMatch.email,
+      };
+    }
+  }
+
   const members = await listMembersStatic();
   const match = findMemberInList(members, trimmed);
   if (!match) return null;
@@ -865,6 +1013,7 @@ export async function lookupTransferRecipientStatic(
 export async function executeP2PTransferStatic(params: {
   senderUid: string;
   senderEmail?: string;
+  senderUsername?: string;
   recipientIdentifier: string;
   accountMode: AccountMode;
   amount: number;
@@ -877,6 +1026,7 @@ export async function executeP2PTransferStatic(params: {
       ok: true;
       amount: number;
       senderRemainingBalance: number;
+      sentTransaction: WalletTransaction;
       recipient: { uid: string; username: string; email: string; newBalance: number };
     }
   | { ok: false; error: string }
@@ -891,24 +1041,40 @@ export async function executeP2PTransferStatic(params: {
     return { ok: false, error: 'Enter recipient UID or email.' };
   }
 
-  await listMembersStatic();
-  const members = readStoredMembers();
-  const recipient = findMemberInList(members, cleanRecipient);
+  let recipient: ManagedMember | undefined;
+  let recipientInFirestore = false;
+  if (isFirebaseConfigured && db) {
+    const fsRecipient = await findMemberDocInFirestore(cleanRecipient);
+    if (fsRecipient) {
+      recipient = fsRecipient;
+      recipientInFirestore = true;
+    }
+  }
+
+  if (!recipient) {
+    await listMembersStatic();
+    recipient = findMemberInList(readStoredMembers(), cleanRecipient);
+  }
+
   if (!recipient) {
     return { ok: false, error: "Account doesn't exist." };
   }
 
   if (
-    recipient.uid === params.senderUid ||
+    recipient.uid.trim().toLowerCase() === params.senderUid.trim().toLowerCase() ||
     (params.senderEmail &&
-      recipient.email.toLowerCase() === params.senderEmail.trim().toLowerCase())
+      recipient.email.trim().toLowerCase() === params.senderEmail.trim().toLowerCase())
   ) {
     return { ok: false, error: 'Cannot transfer to your own account.' };
   }
 
   const nowMs = Date.now();
+  const nowStr = new Date(nowMs).toLocaleString();
+  const walletField = params.accountMode === 'demo' ? 'demoBalance' : 'realBalance';
   const currentRecBal =
     params.accountMode === 'demo' ? recipient.demoBalance : recipient.realBalance;
+  const sentTxId = `p2p-out-${nowMs}-${randomHexId(3)}`;
+  const recTxId = `p2p-in-${nowMs}-${randomHexId(3)}`;
 
   if (params.isLocalDemoSession) {
     if (params.expectedLocalPin && params.pin !== params.expectedLocalPin) {
@@ -930,22 +1096,34 @@ export async function executeP2PTransferStatic(params: {
       demoBalance:
         params.accountMode === 'demo' ? recipientNewBalance : recipient.demoBalance,
     };
-    saveStoredMembers(members.map((m) => (m.uid === recipient.uid ? updatedRecipient : m)));
+    upsertMemberInLocalCache(updatedRecipient);
+    const sentTx: WalletTransaction = {
+      id: sentTxId,
+      userId: params.senderUid,
+      userEmail: params.senderEmail,
+      type: `P2P TRANSFER SENT (${params.accountMode.toUpperCase()})`,
+      amount,
+      target: `${recipient.username} (${recipient.uid})`,
+      status: 'SUCCESS',
+      timestamp: nowStr,
+      rawTime: nowMs,
+    };
     appendMemberActivity(recipient.uid, {
-      id: `p2p-in-${nowMs}-${randomHexId(2)}`,
+      id: recTxId,
       userId: recipient.uid,
       userEmail: recipient.email,
       type: `P2P TRANSFER RECEIVED (${params.accountMode.toUpperCase()})`,
       amount,
       target: `From ${params.senderUid}`,
       status: 'SUCCESS',
-      timestamp: new Date(nowMs).toLocaleString(),
+      timestamp: nowStr,
       rawTime: nowMs,
     });
     return {
       ok: true,
       amount,
       senderRemainingBalance: senderRemaining,
+      sentTransaction: sentTx,
       recipient: {
         uid: recipient.uid,
         username: recipient.username,
@@ -955,7 +1133,20 @@ export async function executeP2PTransferStatic(params: {
     };
   }
 
-  const sender = findMemberInList(members, params.senderUid);
+  // Fetch authoritative sender from Firestore when available
+  let sender = findMemberInList(readStoredMembers(), params.senderUid);
+  if (isFirebaseConfigured && db) {
+    try {
+      const senderSnap = await getUserDocFromFirestore(params.senderUid);
+      if (senderSnap && senderSnap.exists()) {
+        sender = normalizeMemberDoc(senderSnap.id, senderSnap.data());
+        upsertMemberInLocalCache(sender);
+      }
+    } catch {
+      // Use local sender record if offline
+    }
+  }
+
   const senderPin = sender?.securityPin ?? params.expectedLocalPin ?? '1234';
   if (sender?.isBlocked) {
     return { ok: false, error: 'Your account is restricted.' };
@@ -964,77 +1155,230 @@ export async function executeP2PTransferStatic(params: {
     return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
   }
 
-  const currentSenderBal = sender
-    ? params.accountMode === 'demo'
-      ? sender.demoBalance
-      : sender.realBalance
-    : roundUsd2(params.localSenderBalance ?? 0);
+  const senderName =
+    params.senderUsername?.trim() ||
+    sender?.username ||
+    params.senderEmail?.split('@')[0] ||
+    params.senderUid;
+  const senderEmail = (params.senderEmail || sender?.email || '').trim().toLowerCase();
 
-  if (amount > roundUsd2(currentSenderBal)) {
-    return { ok: false, error: 'Insufficient available balance.' };
+  let senderRemaining = 0;
+  let recipientNewBalance = 0;
+
+  if (isFirebaseConfigured && db && recipientInFirestore) {
+    const firestoreDb = db;
+    const senderRef = doc(firestoreDb, 'users', params.senderUid);
+    const recipientRef = doc(firestoreDb, 'users', recipient.uid);
+
+    try {
+      const txResult = await runTransaction(firestoreDb, async (tx) => {
+        const [senderSnap, recSnap] = await Promise.all([
+          tx.get(senderRef),
+          tx.get(recipientRef),
+        ]);
+
+        if (!recSnap.exists()) {
+          throw new Error("BUSINESS:Account doesn't exist.");
+        }
+
+        const senderData = senderSnap.exists()
+          ? (senderSnap.data() as Record<string, unknown>)
+          : null;
+        const recData = recSnap.data() as Record<string, unknown>;
+
+        if (senderData?.isBlocked) {
+          throw new Error('BUSINESS:Your account is restricted.');
+        }
+
+        const freshSenderBal = senderData
+          ? Number(senderData[walletField] ?? params.localSenderBalance ?? 0)
+          : sender
+            ? params.accountMode === 'demo'
+              ? sender.demoBalance
+              : sender.realBalance
+            : roundUsd2(params.localSenderBalance ?? 0);
+
+        const freshRecBal = Number(recData[walletField] ?? 0);
+
+        if (amount > roundUsd2(freshSenderBal)) {
+          throw new Error('BUSINESS:Insufficient available balance.');
+        }
+
+        const computed = calculatePostTransferBalances({
+          senderBalance: freshSenderBal,
+          recipientBalance: freshRecBal,
+          amount,
+        });
+
+        if (senderSnap.exists()) {
+          tx.update(senderRef, { [walletField]: computed.senderRemaining });
+        } else if (sender) {
+          tx.set(
+            senderRef,
+            {
+              ...sender,
+              [walletField]: computed.senderRemaining,
+            },
+            { merge: true }
+          );
+        }
+
+        tx.update(recipientRef, { [walletField]: computed.recipientNewBalance });
+        return computed;
+      });
+
+      senderRemaining = txResult.senderRemaining;
+      recipientNewBalance = txResult.recipientNewBalance;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.startsWith('BUSINESS:')) {
+        return { ok: false, error: msg.slice('BUSINESS:'.length) };
+      }
+
+      const fbErr = err as { code?: string };
+      if (fbErr?.code === 'permission-denied') {
+        return {
+          ok: false,
+          error: 'Firestore security rules blocked this transfer. Please update rules or sign in again.',
+        };
+      }
+
+      // Fallback to direct sequential updates if transaction encountered transient offline state
+      const currentSenderBal = sender
+        ? params.accountMode === 'demo'
+          ? sender.demoBalance
+          : sender.realBalance
+        : roundUsd2(params.localSenderBalance ?? 0);
+      if (amount > roundUsd2(currentSenderBal)) {
+        return { ok: false, error: 'Insufficient available balance.' };
+      }
+      const computed = calculatePostTransferBalances({
+        senderBalance: currentSenderBal,
+        recipientBalance: currentRecBal,
+        amount,
+      });
+      senderRemaining = computed.senderRemaining;
+      recipientNewBalance = computed.recipientNewBalance;
+
+      await Promise.all([
+        updateDoc(senderRef, { [walletField]: senderRemaining }).catch(() => {}),
+        updateDoc(recipientRef, { [walletField]: recipientNewBalance }).catch(() => {}),
+      ]);
+    }
+
+    // Write transaction records to BOTH sender and recipient Firestore wallet history
+    await Promise.all([
+      setDoc(doc(firestoreDb, 'users', params.senderUid, 'transactions', sentTxId), {
+        id: sentTxId,
+        userId: params.senderUid,
+        userEmail: senderEmail,
+        type: `P2P TRANSFER SENT (${params.accountMode.toUpperCase()})`,
+        amount,
+        target: `${recipient.username} (${recipient.uid})`,
+        counterpartyUid: recipient.uid,
+        counterpartyEmail: recipient.email,
+        status: 'SUCCESS',
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+      }).catch(() => {}),
+      setDoc(doc(firestoreDb, 'users', recipient.uid, 'transactions', recTxId), {
+        id: recTxId,
+        userId: recipient.uid,
+        userEmail: recipient.email,
+        type: `P2P TRANSFER RECEIVED (${params.accountMode.toUpperCase()})`,
+        amount,
+        target: `${senderName} (${params.senderUid})`,
+        counterpartyUid: params.senderUid,
+        counterpartyEmail: senderEmail,
+        status: 'SUCCESS',
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+      }).catch(() => {}),
+    ]);
+  } else {
+    const currentSenderBal = sender
+      ? params.accountMode === 'demo'
+        ? sender.demoBalance
+        : sender.realBalance
+      : roundUsd2(params.localSenderBalance ?? 0);
+
+    if (amount > roundUsd2(currentSenderBal)) {
+      return { ok: false, error: 'Insufficient available balance.' };
+    }
+
+    const computed = calculatePostTransferBalances({
+      senderBalance: currentSenderBal,
+      recipientBalance: currentRecBal,
+      amount,
+    });
+    senderRemaining = computed.senderRemaining;
+    recipientNewBalance = computed.recipientNewBalance;
+
+    if (isFirebaseConfigured && db) {
+      await Promise.all([
+        updateDoc(doc(db, 'users', params.senderUid), {
+          [walletField]: senderRemaining,
+        }).catch(() => {}),
+        setDoc(doc(db, 'users', params.senderUid, 'transactions', sentTxId), {
+          id: sentTxId,
+          userId: params.senderUid,
+          userEmail: senderEmail,
+          type: `P2P TRANSFER SENT (${params.accountMode.toUpperCase()})`,
+          amount,
+          target: `${recipient.username} (${recipient.uid})`,
+          status: 'SUCCESS',
+          createdAtMs: nowMs,
+          createdAt: serverTimestamp(),
+        }).catch(() => {}),
+      ]);
+    }
   }
 
-  const { senderRemaining, recipientNewBalance } = calculatePostTransferBalances({
-    senderBalance: currentSenderBal,
-    recipientBalance: currentRecBal,
+  // Update local cache for both sender and recipient
+  if (sender) {
+    upsertMemberInLocalCache({
+      ...sender,
+      realBalance: params.accountMode === 'real' ? senderRemaining : sender.realBalance,
+      demoBalance: params.accountMode === 'demo' ? senderRemaining : sender.demoBalance,
+    });
+  }
+  upsertMemberInLocalCache({
+    ...recipient,
+    realBalance: params.accountMode === 'real' ? recipientNewBalance : recipient.realBalance,
+    demoBalance: params.accountMode === 'demo' ? recipientNewBalance : recipient.demoBalance,
+  });
+
+  const sentTransaction: WalletTransaction = {
+    id: sentTxId,
+    userId: params.senderUid,
+    userEmail: senderEmail,
+    type: `P2P TRANSFER SENT (${params.accountMode.toUpperCase()})`,
     amount,
-  });
-
-  const nextMembers = members.map((m) => {
-    if (sender && m.uid === sender.uid) {
-      return {
-        ...m,
-        realBalance: params.accountMode === 'real' ? senderRemaining : m.realBalance,
-        demoBalance: params.accountMode === 'demo' ? senderRemaining : m.demoBalance,
-      };
-    }
-    if (m.uid === recipient.uid) {
-      return {
-        ...m,
-        realBalance:
-          params.accountMode === 'real' ? recipientNewBalance : m.realBalance,
-        demoBalance:
-          params.accountMode === 'demo' ? recipientNewBalance : m.demoBalance,
-      };
-    }
-    return m;
-  });
-  saveStoredMembers(nextMembers);
-
-  const walletField = params.accountMode === 'demo' ? 'demoBalance' : 'realBalance';
-  if (isFirebaseConfigured && db) {
-    try {
-      await updateDoc(doc(db, 'users', params.senderUid), {
-        [walletField]: senderRemaining,
-      });
-    } catch {
-      // Graceful fallback
-    }
-    try {
-      await updateDoc(doc(db, 'users', recipient.uid), {
-        [walletField]: recipientNewBalance,
-      });
-    } catch {
-      // Graceful fallback
-    }
-  }
-
-  appendMemberActivity(recipient.uid, {
-    id: `p2p-in-${nowMs}-${randomHexId(2)}`,
+    target: `${recipient.username} (${recipient.uid})`,
+    status: 'SUCCESS',
+    timestamp: nowStr,
+    rawTime: nowMs,
+  };
+  const receivedTransaction: WalletTransaction = {
+    id: recTxId,
     userId: recipient.uid,
     userEmail: recipient.email,
     type: `P2P TRANSFER RECEIVED (${params.accountMode.toUpperCase()})`,
     amount,
-    target: `${sender?.username || params.senderUid} (${params.senderUid})`,
+    target: `${senderName} (${params.senderUid})`,
     status: 'SUCCESS',
-    timestamp: new Date(nowMs).toLocaleString(),
+    timestamp: nowStr,
     rawTime: nowMs,
-  });
+  };
+
+  appendMemberActivity(params.senderUid, sentTransaction);
+  appendMemberActivity(recipient.uid, receivedTransaction);
 
   return {
     ok: true,
     amount,
     senderRemainingBalance: senderRemaining,
+    sentTransaction,
     recipient: {
       uid: recipient.uid,
       username: recipient.username,

@@ -27,6 +27,7 @@ import {
   updateNewsArticleStatic,
 } from './newsService';
 import { clearMemoryStorageForTests } from './storageHelper';
+import { firebaseConfig } from './firebaseClient';
 import {
   adjustMemberBalanceStatic,
   approveDepositRequestStatic,
@@ -35,12 +36,15 @@ import {
   createWalletRequestStatic,
   executeP2PTransferStatic,
   getInitialPlatformSettingsSync,
+  getMemberActivitySync,
   listMembersStatic,
   listStaffRequestsStatic,
+  lookupTransferRecipientStatic,
   rejectWithdrawalRequestStatic,
   saveBrandLogoStatic,
   savePlatformSettingsStatic,
 } from './walletAdminService';
+import { deduplicateFirestoreAgainstSql } from '../utils/depositHistory';
 
 beforeEach(() => {
   clearMemoryStorageForTests();
@@ -315,10 +319,17 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
     );
     assert.equal(rejected.updatedMember?.realBalance, 1720);
 
+    const lookupByUpperEmail = await lookupTransferRecipientStatic('MARCUS.C@ZECTRADE.IO');
+    assert.equal(lookupByUpperEmail?.uid, 'USR-7731');
+
+    const lookupByUid = await lookupTransferRecipientStatic('USR-7731');
+    assert.equal(lookupByUid?.email, 'marcus.c@zectrade.io');
+
     const transfer = await executeP2PTransferStatic({
       senderUid: 'USR-9012',
-      senderEmail: 'aung.kyaw@zectrade.io',
-      recipientIdentifier: 'USR-7731',
+      senderEmail: 'alex.chen@zectrade.io',
+      senderUsername: 'AlexChen',
+      recipientIdentifier: 'MARCUS.C@ZECTRADE.IO',
       accountMode: 'real',
       amount: 1,
       pin: '1234',
@@ -326,6 +337,23 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
     assert.equal(transfer.ok, true);
     if (transfer.ok) {
       assert.equal(transfer.recipient.newBalance, 8901);
+      assert.equal(transfer.sentTransaction.type, 'P2P TRANSFER SENT (REAL)');
+
+      const senderHistory = getMemberActivitySync('USR-9012');
+      const recipientHistory = getMemberActivitySync('USR-7731');
+      assert.equal(senderHistory.some((tx) => tx.id === transfer.sentTransaction.id), true);
+      assert.equal(
+        recipientHistory.some(
+          (tx) => tx.type === 'P2P TRANSFER RECEIVED (REAL)' && tx.amount === 1
+        ),
+        true
+      );
+
+      const deduped = deduplicateFirestoreAgainstSql(
+        [transfer.sentTransaction],
+        [transfer.sentTransaction]
+      );
+      assert.equal(deduped.length, 1);
     }
 
     const adjusted = await adjustMemberBalanceStatic({
@@ -365,5 +393,17 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
     assert.equal(settings.brandLogoUrl, '/logo.png');
     assert.equal(settings.depositRateMMK, 4400);
     assert.equal(settings.csrTelegramLink, 'https://t.me/custom_csr');
+  });
+
+  it('uses the exact zectrade-357ff Firebase configuration across client initialization', () => {
+    assert.deepEqual(firebaseConfig, {
+      apiKey: 'AIzaSyDZETBSCx35a_syK069_WUvw6wEOMYCKyc',
+      authDomain: 'zectrade-357ff.firebaseapp.com',
+      projectId: 'zectrade-357ff',
+      storageBucket: 'zectrade-357ff.firebasestorage.app',
+      messagingSenderId: '1079525755073',
+      appId: '1:1079525755073:web:fbbca0e3521a5709af6c40',
+      measurementId: 'G-P4EQE872T5',
+    });
   });
 });

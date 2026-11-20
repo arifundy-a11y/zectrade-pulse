@@ -260,6 +260,7 @@ export function deduplicateFirestoreAgainstSql(
   sqlEntries: WalletTransaction[],
   nonSqlEntries: WalletTransaction[]
 ): WalletTransaction[] {
+  const existingIds = new Set(sqlEntries.map((r) => r.id).filter(Boolean));
   const sqlDepositAndWithdrawalSignatures = sqlEntries
     .filter((row) => isDepositTransaction(row) || row.type.toUpperCase().includes('WITHDRAWAL'))
     .map((row) => ({
@@ -270,6 +271,7 @@ export function deduplicateFirestoreAgainstSql(
     }));
 
   const filtered = nonSqlEntries.filter((item) => {
+    if (item.id && existingIds.has(item.id)) return false;
     if (item.id.startsWith('sql-')) return false;
     const itemIsDeposit = isDepositTransaction(item);
     const itemIsWithdraw = item.type.toUpperCase().includes('WITHDRAWAL');
@@ -287,7 +289,15 @@ export function deduplicateFirestoreAgainstSql(
     return !matchesSql;
   });
 
-  const merged = [...sqlEntries, ...filtered];
+  const merged: WalletTransaction[] = [];
+  const seenMergedIds = new Set<string>();
+  for (const row of [...sqlEntries, ...filtered]) {
+    if (row.id) {
+      if (seenMergedIds.has(row.id)) continue;
+      seenMergedIds.add(row.id);
+    }
+    merged.push(row);
+  }
   merged.sort((a, b) => (b.rawTime ?? 0) - (a.rawTime ?? 0));
   return merged;
 }
