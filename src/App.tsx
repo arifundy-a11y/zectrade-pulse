@@ -3,6 +3,7 @@ import {
   createUserWithEmailAndPassword,
   getRedirectResult,
   onAuthStateChanged,
+  sendEmailVerification,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
@@ -50,6 +51,7 @@ import { WalletWorkspace } from './components/WalletWorkspace';
 import {
   deduplicateFirestoreAgainstSql,
 } from './utils/depositHistory';
+import { verifyTotpCode } from './utils/twoFactor';
 import {
   auth,
   db,
@@ -581,6 +583,9 @@ export default function App() {
             (data.withdrawAccountNumber as string | null | undefined) ??
             syncedMember.withdrawAccountNumber ??
             null,
+          emailVerified: Boolean(fbUser.emailVerified),
+          twoFactorEnabled: Boolean(data.twoFactorEnabled),
+          twoFactorSecret: data.twoFactorSecret ? String(data.twoFactorSecret) : null,
         });
 
         if (isFirebaseConfigured && db) {
@@ -694,6 +699,16 @@ export default function App() {
               d.withdrawAccountNumber !== undefined
                 ? (d.withdrawAccountNumber as string | null)
                 : prev.withdrawAccountNumber,
+            twoFactorEnabled:
+              typeof d.twoFactorEnabled === 'boolean'
+                ? d.twoFactorEnabled
+                : prev.twoFactorEnabled,
+            twoFactorSecret:
+              d.twoFactorSecret !== undefined
+                ? d.twoFactorSecret
+                  ? String(d.twoFactorSecret)
+                  : null
+                : prev.twoFactorSecret,
           };
           stateRef.current.user = nextUser;
           return nextUser;
@@ -2152,6 +2167,7 @@ export default function App() {
 
       if (payload.mode === 'register') {
         const cred = await createUserWithEmailAndPassword(auth, payload.email, payload.password);
+        await sendEmailVerification(cred.user).catch(() => {});
         const name = payload.username || payload.email.split('@')[0];
         const cleanRegEmail = payload.email.trim().toLowerCase();
         await setDoc(doc(db, 'users', cred.user.uid), {
@@ -2166,6 +2182,7 @@ export default function App() {
           hasDepositedBefore: false,
           hasTradedAfterDeposit: false,
           withdrawLockClearedByAdmin: false,
+          twoFactorEnabled: false,
           demoBalance: 100000,
           realBalance: FIRST_REGISTER_REAL_BONUS_USD,
           spotHoldings: {},
@@ -2182,7 +2199,7 @@ export default function App() {
           createdAtMs: Date.now(),
           createdAt: serverTimestamp(),
         });
-        showToast('Account registered! $2.00 Real bonus credited (deposit & trade required to withdraw).');
+        showToast('Account registered! Verification link sent to your email, and $2.00 Real bonus credited.');
       } else {
         await signInWithEmailAndPassword(auth, payload.email, payload.password);
         showToast('Signed in successfully.');
@@ -2565,7 +2582,8 @@ export default function App() {
     method: string,
     usdAmount: number,
     targetDesc: string,
-    pin: string
+    pin: string,
+    totpCode?: string
   ): Promise<boolean> => {
     const eligibility = evaluateWithdrawalEligibility(user);
     if (!eligibility.allowed) {
@@ -2575,6 +2593,12 @@ export default function App() {
     if (pin !== user.pin) {
       showToast('Incorrect 4-digit Security PIN.', 'error');
       return false;
+    }
+    if (user.twoFactorEnabled) {
+      if (!verifyTotpCode(user.twoFactorSecret, totpCode || '')) {
+        showToast('Invalid 6-digit Google Authenticator code.', 'error');
+        return false;
+      }
     }
     if (usdAmount <= 0 || usdAmount > user.realBalance) {
       showToast('Insufficient Real Balance for withdrawal.', 'error');
@@ -2671,12 +2695,19 @@ export default function App() {
   const handleSubmitTransfer = async (
     recipient: string,
     amount: number,
-    pin: string
+    pin: string,
+    totpCode?: string
   ): Promise<{ ok: boolean; error?: string }> => {
     const transferMode: AccountMode = 'real';
     if (pin !== user.pin) {
       showToast('Incorrect 4-digit Security PIN.', 'error');
       return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
+    }
+    if (user.twoFactorEnabled) {
+      if (!verifyTotpCode(user.twoFactorSecret, totpCode || '')) {
+        showToast('Invalid 6-digit Google Authenticator code.', 'error');
+        return { ok: false, error: 'Invalid 6-digit Google Authenticator code.' };
+      }
     }
     const avail = user.realBalance;
     if (!Number.isFinite(amount) || amount < 1 || amount > avail) {
@@ -2706,6 +2737,9 @@ export default function App() {
       isLocalDemoSession: user.isLocalDemoSession,
       localSenderBalance: avail,
       expectedLocalPin: user.pin,
+      totpCode,
+      expectedLocalTwoFactorEnabled: Boolean(user.twoFactorEnabled),
+      expectedLocalTwoFactorSecret: user.twoFactorSecret ?? null,
     });
 
     if (!result.ok) {
@@ -2761,6 +2795,127 @@ export default function App() {
       }
     }
     showToast('Security PIN updated.');
+  };
+
+  const handleSendVerificationEmail = async (): Promise<{ ok: boolean; sentAtMs?: number }> => {
+    if (!isFirebaseConfigured || !auth?.currentUser) {
+      showToast(
+        'Email verification links are sent via Firebase Auth for registered email accounts.',
+        'error'
+      );
+      return { ok: false };
+    }
+    if (auth.currentUser.emailVerified) {
+      setUser((prev) => ({ ...prev, emailVerified: true }));
+      showToast('Your email address is already verified.');
+      return { ok: false };
+    }
+    try {
+      await sendEmailVerification(auth.currentUser);
+      showToast(`Verification link sent to ${auth.currentUser.email || user.email}.`);
+      return { ok: true, sentAtMs: Date.now() };
+    } catch (err: unknown) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === 'auth/too-many-requests') {
+        showToast('Please wait 60 seconds before requesting another verification email.', 'error');
+      } else {
+        showToast('Unable to send verification email right now. Please try again.', 'error');
+      }
+      return { ok: false };
+    }
+  };
+
+  const handleRefreshEmailVerification = async (): Promise<void> => {
+    if (!isFirebaseConfigured || !auth?.currentUser) {
+      showToast('Sign in with a registered email account to check email verification status.', 'error');
+      return;
+    }
+    try {
+      await auth.currentUser.reload();
+      const verified = Boolean(auth.currentUser.emailVerified);
+      setUser((prev) => ({ ...prev, emailVerified: verified }));
+      if (verified) {
+        if (db) {
+          await setDoc(
+            doc(db, 'users', auth.currentUser.uid),
+            { emailVerified: true },
+            { merge: true }
+          ).catch(() => {});
+        }
+        showToast('Email verified successfully!');
+      } else {
+        showToast('Email is still unverified. Click the link in your inbox, then refresh.', 'error');
+      }
+    } catch {
+      showToast('Could not refresh verification status. Please try again.', 'error');
+    }
+  };
+
+  const handleEnableTwoFactor = async (
+    secretBase32: string,
+    verificationCode: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!verifyTotpCode(secretBase32, verificationCode)) {
+      return { ok: false, error: 'Invalid 6-digit Google Authenticator code.' };
+    }
+    const targetUid = auth?.currentUser?.uid || user.uid;
+    if (!user.isLocalDemoSession && isFirebaseConfigured && db && targetUid) {
+      try {
+        await setDoc(
+          doc(db, 'users', targetUid),
+          {
+            twoFactorEnabled: true,
+            twoFactorSecret: secretBase32,
+          },
+          { merge: true }
+        );
+      } catch {
+        return {
+          ok: false,
+          error: 'Could not save 2FA settings to Firestore. Please check your connection.',
+        };
+      }
+    }
+    setUser((prev) => ({
+      ...prev,
+      twoFactorEnabled: true,
+      twoFactorSecret: secretBase32,
+    }));
+    showToast('Google Authenticator (2FA) enabled.');
+    return { ok: true };
+  };
+
+  const handleDisableTwoFactor = async (
+    verificationCode: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!verifyTotpCode(user.twoFactorSecret, verificationCode)) {
+      return { ok: false, error: 'Invalid 6-digit Google Authenticator code.' };
+    }
+    const targetUid = auth?.currentUser?.uid || user.uid;
+    if (!user.isLocalDemoSession && isFirebaseConfigured && db && targetUid) {
+      try {
+        await setDoc(
+          doc(db, 'users', targetUid),
+          {
+            twoFactorEnabled: false,
+            twoFactorSecret: null,
+          },
+          { merge: true }
+        );
+      } catch {
+        return {
+          ok: false,
+          error: 'Could not update 2FA settings in Firestore. Please try again.',
+        };
+      }
+    }
+    setUser((prev) => ({
+      ...prev,
+      twoFactorEnabled: false,
+      twoFactorSecret: null,
+    }));
+    showToast('Google Authenticator (2FA) disabled.');
+    return { ok: true };
   };
 
   const handleSaveOwnProfile = async (payload: MemberProfileUpdatePayload): Promise<boolean> => {
@@ -3557,6 +3712,11 @@ export default function App() {
                 setStaffModalOpen(true);
               }}
               onLogout={handleLogout}
+              onSendVerificationEmail={handleSendVerificationEmail}
+              onRefreshEmailVerification={handleRefreshEmailVerification}
+              onEnableTwoFactor={handleEnableTwoFactor}
+              onDisableTwoFactor={handleDisableTwoFactor}
+              onCopySetupKey={(secret) => copyText(secret, '2FA Setup Key')}
             />
           )}
 
@@ -3705,6 +3865,8 @@ export default function App() {
           currentUserUid={user.uid}
           currentUserEmail={user.email}
           userPin={user.pin}
+          twoFactorEnabled={Boolean(user.twoFactorEnabled)}
+          onVerifyTwoFactor={(code) => verifyTotpCode(user.twoFactorSecret, code)}
           onLookupRecipient={handleLookupTransferRecipient}
           onSubmitTransfer={handleSubmitTransfer}
           onClose={() => setTransferModalOpen(false)}

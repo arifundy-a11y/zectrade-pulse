@@ -419,7 +419,13 @@ export const DepositModal: React.FC<{
 export const WithdrawModal: React.FC<{
   user: UserProfile;
   withdrawRateMMK: number;
-  onSubmitWithdraw: (method: string, usdAmount: number, targetDesc: string, pin: string) => Promise<boolean>;
+  onSubmitWithdraw: (
+    method: string,
+    usdAmount: number,
+    targetDesc: string,
+    pin: string,
+    totpCode?: string
+  ) => Promise<boolean>;
   onOpenDeposit?: () => void;
   onClose: () => void;
 }> = ({ user, withdrawRateMMK, onSubmitWithdraw, onOpenDeposit, onClose }) => {
@@ -431,6 +437,7 @@ export const WithdrawModal: React.FC<{
   const [amountInput, setAmountInput] = useState('');
   const [pin, setPin] = useState('');
   const [showPin, setShowPin] = useState(false);
+  const [totpCode, setTotpCode] = useState('');
 
   const isMmkMethod = method !== 'usdt';
   const effectiveCurrency = isMmkMethod ? currencyMode : 'usdt';
@@ -448,7 +455,13 @@ export const WithdrawModal: React.FC<{
     const targetDesc =
       `${isMmkMethod && holderName.trim() ? `${holderName.trim()} (${target.trim()})` : target.trim()}` +
       `${isMmkMethod ? ` (${mmkAmount.toLocaleString('en-US')} MMK)` : ''}`;
-    const ok = await onSubmitWithdraw(method, usdAmount, targetDesc, pin.trim());
+    const ok = await onSubmitWithdraw(
+      method,
+      usdAmount,
+      targetDesc,
+      pin.trim(),
+      user.twoFactorEnabled ? totpCode.trim() : undefined
+    );
     if (ok) onClose();
   };
 
@@ -631,6 +644,30 @@ export const WithdrawModal: React.FC<{
           </div>
         </div>
 
+        {user.twoFactorEnabled && (
+          <div>
+            <label
+              htmlFor="wd-totp"
+              className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5 mb-1"
+            >
+              <Shield className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Google Authenticator (6-Digit 2FA Code)</span>
+            </label>
+            <input
+              id="wd-totp"
+              data-testid="withdraw-totp-input"
+              type="text"
+              maxLength={6}
+              inputMode="numeric"
+              required
+              value={totpCode}
+              onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              placeholder="000000"
+              className="w-full bg-slate-950 border border-emerald-500/40 rounded-lg px-3 py-2 text-center font-mono tracking-[0.35em] text-sm text-emerald-300"
+            />
+          </div>
+        )}
+
         <div className="grid grid-cols-2 gap-2 pt-1">
           <button type="button" onClick={onClose} className="py-2 rounded-lg bg-slate-800 text-slate-300 text-xs font-semibold">
             Cancel
@@ -661,13 +698,16 @@ export const TransferModal: React.FC<{
   currentUserUid: string;
   currentUserEmail: string;
   userPin: string;
+  twoFactorEnabled?: boolean;
+  onVerifyTwoFactor?: (code: string) => boolean;
   onLookupRecipient: (
     recipient: string
   ) => Promise<{ ok: true; recipient: VerifiedTransferRecipient } | { ok: false; error: string }>;
   onSubmitTransfer: (
     recipient: string,
     amount: number,
-    pin: string
+    pin: string,
+    totpCode?: string
   ) => Promise<{ ok: boolean; error?: string }>;
   onClose: () => void;
 }> = ({
@@ -676,6 +716,8 @@ export const TransferModal: React.FC<{
   currentUserUid,
   currentUserEmail,
   userPin,
+  twoFactorEnabled = false,
+  onVerifyTwoFactor,
   onLookupRecipient,
   onSubmitTransfer,
   onClose,
@@ -685,6 +727,7 @@ export const TransferModal: React.FC<{
   const [amountInput, setAmountInput] = useState('');
   const [pin, setPin] = useState('');
   const [showPin, setShowPin] = useState(false);
+  const [totpCode, setTotpCode] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -712,10 +755,17 @@ export const TransferModal: React.FC<{
       availableBalance,
       pinInput: pin,
       expectedPin: userPin,
+      twoFactorEnabled,
+      totpCode,
     });
 
     if (!validation.ok) {
       setErrorMsg(validation.error);
+      return;
+    }
+
+    if (twoFactorEnabled && onVerifyTwoFactor && !onVerifyTwoFactor(totpCode.trim())) {
+      setErrorMsg('Invalid 6-digit Google Authenticator code.');
       return;
     }
 
@@ -738,7 +788,12 @@ export const TransferModal: React.FC<{
     setErrorMsg(null);
     setSubmitting(true);
     try {
-      const res = await onSubmitTransfer(verifiedRecipient.uid, parsedAmount, pin.trim());
+      const res = await onSubmitTransfer(
+        verifiedRecipient.uid,
+        parsedAmount,
+        pin.trim(),
+        twoFactorEnabled ? totpCode.trim() : undefined
+      );
       if (res.ok) {
         onClose();
       } else {
@@ -881,6 +936,33 @@ export const TransferModal: React.FC<{
               </div>
             </div>
 
+            {twoFactorEnabled && (
+              <div>
+                <label
+                  htmlFor="tr-totp"
+                  className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5 mb-1"
+                >
+                  <Shield className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Google Authenticator (6-Digit 2FA Code)</span>
+                </label>
+                <input
+                  id="tr-totp"
+                  data-testid="transfer-totp-input"
+                  type="text"
+                  maxLength={6}
+                  inputMode="numeric"
+                  required
+                  value={totpCode}
+                  onChange={(e) => {
+                    setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                    if (errorMsg) setErrorMsg(null);
+                  }}
+                  placeholder="000000"
+                  className="w-full bg-slate-950 border border-emerald-500/40 rounded-lg px-3 py-2 text-center font-mono tracking-[0.35em] text-sm text-emerald-300"
+                />
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-2 pt-1">
               <button
                 type="button"
@@ -928,7 +1010,11 @@ export const TransferModal: React.FC<{
 
             <p className="text-[11px] text-emerald-400 flex items-center gap-1.5 font-medium">
               <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-              <span>Security PIN verified. Recipient balance will be credited immediately.</span>
+              <span>
+                {twoFactorEnabled
+                  ? 'Security PIN & Google Authenticator verified. Recipient balance will be credited immediately.'
+                  : 'Security PIN verified. Recipient balance will be credited immediately.'}
+              </span>
             </p>
 
             <div className="grid grid-cols-2 gap-2 pt-1">

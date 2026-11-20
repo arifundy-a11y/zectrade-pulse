@@ -44,6 +44,7 @@ import {
   type DepositFilterStatus,
   type DpWdKindFilter,
 } from '../utils/depositHistory';
+import { AccountSecurityCard } from './AccountSecurityCard';
 
 type WalletTab = 'overview' | 'dp_wd_history' | 'invitation';
 
@@ -68,6 +69,11 @@ interface WalletWorkspaceProps {
   onOpenWalletHistoryModal: () => void;
   onOpenStaffModal: () => void;
   onLogout: () => void;
+  onSendVerificationEmail: () => Promise<{ ok: boolean; sentAtMs?: number }>;
+  onRefreshEmailVerification: () => Promise<void>;
+  onEnableTwoFactor: (secretBase32: string, verificationCode: string) => Promise<{ ok: boolean; error?: string }>;
+  onDisableTwoFactor: (verificationCode: string) => Promise<{ ok: boolean; error?: string }>;
+  onCopySetupKey?: (secret: string) => void;
 }
 
 export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
@@ -91,6 +97,11 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
   onOpenWalletHistoryModal,
   onOpenStaffModal,
   onLogout,
+  onSendVerificationEmail,
+  onRefreshEmailVerification,
+  onEnableTwoFactor,
+  onDisableTwoFactor,
+  onCopySetupKey,
 }) => {
   const [activeTab, setActiveTab] = useState<WalletTab>('overview');
   const [kindFilter, setKindFilter] = useState<DpWdKindFilter>('all');
@@ -514,6 +525,16 @@ export const WalletWorkspace: React.FC<WalletWorkspaceProps> = ({
               </button>
             </div>
           </div>
+
+          <AccountSecurityCard
+            user={user}
+            onOpenPinModal={onOpenPinModal}
+            onSendVerificationEmail={onSendVerificationEmail}
+            onRefreshEmailVerification={onRefreshEmailVerification}
+            onEnableTwoFactor={onEnableTwoFactor}
+            onDisableTwoFactor={onDisableTwoFactor}
+            onCopySetupKey={onCopySetupKey}
+          />
 
           {/* Spot Portfolio Holdings (Real Mode) */}
           {accountMode === 'real' && (

@@ -21,6 +21,7 @@ import type {
   WithdrawMethod,
 } from '../types';
 import { calculatePostTransferBalances, roundUsd2, validateP2PTransferInput } from '../utils/transferEngine';
+import { verifyTotpCode } from '../utils/twoFactor';
 import { db, isFirebaseConfigured } from './firebaseClient';
 import { randomHexId, readStorageJson, writeStorageJson } from './storageHelper';
 
@@ -236,6 +237,9 @@ export async function executeDirectP2PTransfer(params: {
   isLocalDemoSession?: boolean;
   localSenderBalance?: number;
   expectedLocalPin?: string;
+  totpCode?: string;
+  expectedLocalTwoFactorEnabled?: boolean;
+  expectedLocalTwoFactorSecret?: string | null;
 }): Promise<
   | {
       ok: true;
@@ -296,6 +300,11 @@ export async function executeDirectP2PTransfer(params: {
     if (params.expectedLocalPin && params.pin !== params.expectedLocalPin) {
       return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
     }
+    if (params.expectedLocalTwoFactorEnabled && params.expectedLocalTwoFactorSecret) {
+      if (!verifyTotpCode(params.expectedLocalTwoFactorSecret, params.totpCode || '')) {
+        return { ok: false, error: 'Invalid 6-digit Google Authenticator code.' };
+      }
+    }
     const localBal = roundUsd2(params.localSenderBalance ?? 0);
     if (amount > localBal) {
       return { ok: false, error: 'Insufficient available balance.' };
@@ -348,12 +357,21 @@ export async function executeDirectP2PTransfer(params: {
 
   // 2. Fetch authoritative sender directly from Firestore "users" to verify Security PIN & real balance
   let sender = findCachedMember(readCachedMembers(), params.senderUid);
+  let senderTwoFactorEnabled = Boolean(params.expectedLocalTwoFactorEnabled);
+  let senderTwoFactorSecret = params.expectedLocalTwoFactorSecret || null;
   if (isFirebaseConfigured && db) {
     try {
       const senderSnap = await fetchUserDocFresh(params.senderUid);
       if (senderSnap && senderSnap.exists()) {
-        sender = normalizeUserDoc(senderSnap.id, senderSnap.data());
+        const rawSender = senderSnap.data() as Record<string, unknown>;
+        sender = normalizeUserDoc(senderSnap.id, rawSender);
         upsertCachedMember(sender);
+        if (typeof rawSender.twoFactorEnabled === 'boolean') {
+          senderTwoFactorEnabled = rawSender.twoFactorEnabled;
+        }
+        if (typeof rawSender.twoFactorSecret === 'string') {
+          senderTwoFactorSecret = rawSender.twoFactorSecret;
+        }
       }
     } catch {
       // Offline / rule fallback
@@ -366,6 +384,11 @@ export async function executeDirectP2PTransfer(params: {
   }
   if (senderPin !== params.pin) {
     return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
+  }
+  if (senderTwoFactorEnabled && senderTwoFactorSecret) {
+    if (!verifyTotpCode(senderTwoFactorSecret, params.totpCode || '')) {
+      return { ok: false, error: 'Invalid 6-digit Google Authenticator code.' };
+    }
   }
 
   const senderName =
@@ -405,6 +428,12 @@ export async function executeDirectP2PTransfer(params: {
 
         if (senderData?.securityPin && String(senderData.securityPin) !== params.pin) {
           throw new Error('BUSINESS:Incorrect 4-digit Security PIN.');
+        }
+
+        if (senderData?.twoFactorEnabled && senderData?.twoFactorSecret) {
+          if (!verifyTotpCode(String(senderData.twoFactorSecret), params.totpCode || '')) {
+            throw new Error('BUSINESS:Invalid 6-digit Google Authenticator code.');
+          }
         }
 
         const freshSenderBal = senderData

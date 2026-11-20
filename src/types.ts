@@ -122,6 +122,9 @@ export interface UserProfile {
   withdrawMethod?: WithdrawMethod;
   withdrawAccountName?: string | null;
   withdrawAccountNumber?: string | null;
+  emailVerified?: boolean;
+  twoFactorEnabled?: boolean;
+  twoFactorSecret?: string | null;
 }
 
 export interface DepositAccountInfo {

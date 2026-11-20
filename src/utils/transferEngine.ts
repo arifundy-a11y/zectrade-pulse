@@ -6,6 +6,8 @@ export interface P2PTransferValidationInput {
   availableBalance: number;
   pinInput: string;
   expectedPin?: string;
+  twoFactorEnabled?: boolean;
+  totpCode?: string;
 }
 
 export type P2PTransferValidationResult =
@@ -14,6 +16,7 @@ export type P2PTransferValidationResult =
       recipientIdentifier: string;
       amount: number;
       pin: string;
+      totpCode?: string;
     }
   | {
       ok: false;
@@ -60,11 +63,17 @@ export function validateP2PTransferInput(
     return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
   }
 
+  const totpCode = (input.totpCode || '').trim();
+  if (input.twoFactorEnabled && !/^\d{6}$/.test(totpCode)) {
+    return { ok: false, error: 'Enter your 6-digit Google Authenticator code.' };
+  }
+
   return {
     ok: true,
     recipientIdentifier,
     amount,
     pin,
+    totpCode: totpCode || undefined,
   };
 }
 

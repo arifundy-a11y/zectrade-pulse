@@ -105,3 +105,45 @@ test('calculatePostTransferBalances deducts sender and credits recipient cleanly
   assert.equal(postTransferNoDeposit.lockType, 'no_deposit');
   assert.equal(postTransferNoDeposit.reason, 'Please make your first deposit to withdraw funds.');
 });
+
+test('validateP2PTransferInput requires 6-digit 2FA code only when twoFactorEnabled is true', () => {
+  const without2fa = validateP2PTransferInput({
+    senderUid: 'USR-1001',
+    senderEmail: 'sender@zectrade.io',
+    recipientIdentifier: 'USR-9012',
+    amount: 25,
+    availableBalance: 100,
+    pinInput: '1234',
+    expectedPin: '1234',
+    twoFactorEnabled: false,
+  });
+  assert.equal(without2fa.ok, true);
+
+  const missingCode = validateP2PTransferInput({
+    senderUid: 'USR-1001',
+    senderEmail: 'sender@zectrade.io',
+    recipientIdentifier: 'USR-9012',
+    amount: 25,
+    availableBalance: 100,
+    pinInput: '1234',
+    expectedPin: '1234',
+    twoFactorEnabled: true,
+    totpCode: '12',
+  });
+  assert.equal(missingCode.ok, false);
+  if (!missingCode.ok) assert.match(missingCode.error, /Google Authenticator/i);
+
+  const withValidFormat = validateP2PTransferInput({
+    senderUid: 'USR-1001',
+    senderEmail: 'sender@zectrade.io',
+    recipientIdentifier: 'USR-9012',
+    amount: 25,
+    availableBalance: 100,
+    pinInput: '1234',
+    expectedPin: '1234',
+    twoFactorEnabled: true,
+    totpCode: '123456',
+  });
+  assert.equal(withValidFormat.ok, true);
+});
+

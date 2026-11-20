@@ -248,6 +248,9 @@ export const DEMO_USER_TEMPLATE: UserProfile = {
   withdrawMethod: 'kpay',
   withdrawAccountName: null,
   withdrawAccountNumber: null,
+  emailVerified: false,
+  twoFactorEnabled: false,
+  twoFactorSecret: null,
 };
 
 export const SEED_MANAGED_MEMBERS: ManagedMember[] = [
