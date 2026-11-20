@@ -458,15 +458,37 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
     assert.equal(settings.csrTelegramLink, 'https://t.me/custom_csr');
   });
 
-  it('uses the exact zectrade-357ff Firebase configuration across client initialization', () => {
+  it('uses the exact zectrade-357ff Firebase configuration with custom authDomain', () => {
     assert.deepEqual(firebaseConfig, {
       apiKey: 'AIzaSyDZETBSCx35a_syK069_WUvw6wEOMYCKyc',
-      authDomain: 'zectrade-357ff.firebaseapp.com',
+      authDomain: 'zectrading.com',
       projectId: 'zectrade-357ff',
       storageBucket: 'zectrade-357ff.firebasestorage.app',
       messagingSenderId: '1079525755073',
       appId: '1:1079525755073:web:fbbca0e3521a5709af6c40',
       measurementId: 'G-P4EQE872T5',
     });
+  });
+
+  it('configures Netlify /__/auth/* proxy rule before the SPA catch-all /* rule', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const redirectsPath = path.resolve(process.cwd(), 'public/_redirects');
+    const content = fs.readFileSync(redirectsPath, 'utf8');
+    const lines = content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#'));
+
+    const authIdx = lines.findIndex((line) =>
+      /^\/__\/auth\/\*\s+https:\/\/zectrade-357ff\.firebaseapp\.com\/__\/auth\/:splat\s+200$/.test(line),
+    );
+    const spaIdx = lines.findIndex((line) =>
+      /^\/\*\s+\/index\.html\s+200$/.test(line),
+    );
+
+    assert.ok(authIdx !== -1, 'Expected /__/auth/* 200 proxy rule in public/_redirects');
+    assert.ok(spaIdx !== -1, 'Expected /* /index.html 200 SPA catch-all rule in public/_redirects');
+    assert.ok(authIdx < spaIdx, '/__/auth/* proxy rule must appear BEFORE /* catch-all rule');
   });
 });

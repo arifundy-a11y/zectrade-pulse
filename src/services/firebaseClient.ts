@@ -4,7 +4,7 @@ import { getFirestore, type Firestore } from 'firebase/firestore';
 
 export const firebaseConfig = {
   apiKey: 'AIzaSyDZETBSCx35a_syK069_WUvw6wEOMYCKyc',
-  authDomain: 'zectrade-357ff.firebaseapp.com',
+  authDomain: 'zectrading.com',
   projectId: 'zectrade-357ff',
   storageBucket: 'zectrade-357ff.firebasestorage.app',
   messagingSenderId: '1079525755073',
