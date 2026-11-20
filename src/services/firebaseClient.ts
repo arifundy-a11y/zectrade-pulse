@@ -50,3 +50,4 @@ export const auth = (primaryApp ? getAuth(primaryApp) : null) as Auth;
 export const db = (primaryApp ? getFirestore(primaryApp) : null) as Firestore;
 export const oauthAuth = auth;
 export const googleAuthProvider = new GoogleAuthProvider();
+googleAuthProvider.setCustomParameters({ prompt: 'select_account' });

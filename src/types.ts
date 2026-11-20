@@ -322,6 +322,8 @@ export interface AdminManagedCoin {
   symbol: string;
   label: string;
   shortName: string;
+  basePrice?: number;
+  targetPrice?: number | null;
   currentPrice: number;
   openPrice24h: number;
   changePct: number;

@@ -3,6 +3,8 @@ import {
   deleteDoc,
   doc,
   getDocs,
+  getDocsFromServer,
+  onSnapshot,
   setDoc,
 } from 'firebase/firestore';
 import { createDefaultAdminCoins } from '../data/defaults';
@@ -15,7 +17,13 @@ import type {
   CoinTrendBias,
   CoinVolatilityLevel,
 } from '../types';
-import { type ChartTimeframe, type OhlcvCandle, buildPersistentChartCandles } from '../utils/chartEngine';
+import {
+  type ChartTimeframe,
+  type OhlcvCandle,
+  TIMEFRAME_MS,
+  buildPersistentChartCandles,
+  getCandleBucketStartMs,
+} from '../utils/chartEngine';
 import {
   computeOrganicMarketTickPrice,
   computeScheduledCoinPrice,
@@ -24,8 +32,8 @@ import {
 import { db, isFirebaseConfigured } from './firebaseClient';
 import { randomHexId, readStorageJson, writeStorageJson } from './storageHelper';
 
+export const CUSTOM_COINS_COLLECTION = 'custom_coins';
 const COINS_STORAGE_KEY = 'zectrade_custom_coins_v1';
-const COIN_CANDLES_KEY = 'zectrade_coin_candles_v1';
 const COIN_TRADES_KEY = 'zectrade_coin_trades_v1';
 const COIN_CLAIMS_KEY = 'zectrade_coin_claims_v1';
 
@@ -63,14 +71,80 @@ function formatRoundedPrice(val: number): number {
   return Number(val.toFixed(4));
 }
 
+function normalizeAdminCoinDoc(raw: Partial<AdminManagedCoin> & Record<string, unknown>, docId?: string): AdminManagedCoin | null {
+  const symRaw = String(raw.symbol || docId || '').trim();
+  if (!symRaw) return null;
+  const { symbol, label, shortName } = normalizeSymbolParts(
+    symRaw,
+    typeof raw.label === 'string' ? raw.label : undefined
+  );
+  const parsedCurrent = Number(raw.currentPrice);
+  const parsedBase = Number(raw.basePrice);
+  const safeBase =
+    Number.isFinite(parsedBase) && parsedBase > 0
+      ? parsedBase
+      : Number.isFinite(parsedCurrent) && parsedCurrent > 0
+        ? parsedCurrent
+        : 100;
+  const safeCurrent =
+    Number.isFinite(parsedCurrent) && parsedCurrent > 0 ? parsedCurrent : safeBase;
+  const schedule = (raw.schedule as AdminPriceSchedule | null | undefined) ?? null;
+  const parsedTarget = raw.targetPrice != null ? Number(raw.targetPrice) : null;
+  const effectiveTarget =
+    parsedTarget !== null && Number.isFinite(parsedTarget) && parsedTarget > 0
+      ? parsedTarget
+      : schedule?.active
+        ? schedule.downTargetPrice || schedule.upTargetPrice
+        : safeBase;
+  const open24h =
+    Number.isFinite(Number(raw.openPrice24h)) && Number(raw.openPrice24h) > 0
+      ? Number(raw.openPrice24h)
+      : safeBase;
+  const high24h =
+    Number.isFinite(Number(raw.high24h)) && Number(raw.high24h) > 0
+      ? Number(raw.high24h)
+      : Math.max(safeBase, safeCurrent);
+  const low24h =
+    Number.isFinite(Number(raw.low24h)) && Number(raw.low24h) > 0
+      ? Number(raw.low24h)
+      : Math.min(safeBase, safeCurrent);
+  const changePct =
+    open24h > 0 ? Number((((safeCurrent - open24h) / open24h) * 100).toFixed(2)) : 0;
+
+  return {
+    symbol,
+    label: typeof raw.label === 'string' && raw.label.trim() ? raw.label : label,
+    shortName:
+      typeof raw.shortName === 'string' && raw.shortName.trim() ? raw.shortName : shortName,
+    basePrice: safeBase,
+    targetPrice: effectiveTarget,
+    currentPrice: safeCurrent,
+    openPrice24h: open24h,
+    changePct,
+    high24h,
+    low24h,
+    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
+    schedule,
+    updatedAtMs:
+      typeof raw.updatedAtMs === 'number' && Number.isFinite(raw.updatedAtMs)
+        ? raw.updatedAtMs
+        : Date.now(),
+  };
+}
+
 function readStoredCoins(): AdminManagedCoin[] {
   const saved = readStorageJson<StoredCoinsPayload | AdminManagedCoin[]>(COINS_STORAGE_KEY);
   if (Array.isArray(saved)) {
-    writeStorageJson(COINS_STORAGE_KEY, { initialized: true, coins: saved });
-    return saved;
+    const normalized = saved
+      .map((c) => normalizeAdminCoinDoc(c as unknown as Record<string, unknown>, c.symbol))
+      .filter((c): c is AdminManagedCoin => Boolean(c));
+    writeStorageJson(COINS_STORAGE_KEY, { initialized: true, coins: normalized });
+    return normalized;
   }
   if (saved && saved.initialized && Array.isArray(saved.coins)) {
-    return saved.coins;
+    return saved.coins
+      .map((c) => normalizeAdminCoinDoc(c as unknown as Record<string, unknown>, c.symbol))
+      .filter((c): c is AdminManagedCoin => Boolean(c));
   }
   const seeded = createDefaultAdminCoins();
   writeStorageJson(COINS_STORAGE_KEY, { initialized: true, coins: seeded });
@@ -79,14 +153,6 @@ function readStoredCoins(): AdminManagedCoin[] {
 
 function saveStoredCoins(coins: AdminManagedCoin[]): void {
   writeStorageJson(COINS_STORAGE_KEY, { initialized: true, coins });
-}
-
-function readCandlesMap(): Record<string, OhlcvCandle[]> {
-  return readStorageJson<Record<string, OhlcvCandle[]>>(COIN_CANDLES_KEY) ?? {};
-}
-
-function saveCandlesMap(map: Record<string, OhlcvCandle[]>): void {
-  writeStorageJson(COIN_CANDLES_KEY, map);
 }
 
 function readStoredTrades(): CoinTradeRecord[] {
@@ -103,46 +169,6 @@ function readStoredClaims(): AdminProfitClaim[] {
 
 function saveStoredClaims(claims: AdminProfitClaim[]): void {
   writeStorageJson(COIN_CLAIMS_KEY, claims.slice(0, 200));
-}
-
-const lastRecordedCandleBySymbol = new Map<string, { bucketTimeMs: number; price: number }>();
-
-function recordLocalCoinCandleTick(symbol: string, price: number, nowMs: number): void {
-  if (!Number.isFinite(price) || price <= 0) return;
-  const bucketTimeMs = Math.floor(nowMs / 60_000) * 60_000;
-  const cached = lastRecordedCandleBySymbol.get(symbol);
-  if (cached && cached.bucketTimeMs === bucketTimeMs && Math.abs(cached.price - price) < 0.00001) {
-    return;
-  }
-
-  const map = readCandlesMap();
-  const list = Array.isArray(map[symbol]) ? [...map[symbol]] : [];
-  const last = list[list.length - 1];
-  const openPrice = cached ? cached.price : last ? last.close : price;
-  const tickVol = Number((Math.max(8, Math.abs(price - openPrice) * 65 + 6)).toFixed(2));
-  lastRecordedCandleBySymbol.set(symbol, { bucketTimeMs, price });
-
-  if (last && last.time === bucketTimeMs) {
-    list[list.length - 1] = {
-      ...last,
-      high: Math.max(last.high, price),
-      low: Math.min(last.low, price),
-      close: price,
-      volume: Number((last.volume + tickVol).toFixed(2)),
-    };
-  } else {
-    list.push({
-      time: bucketTimeMs,
-      open: openPrice,
-      high: Math.max(openPrice, price),
-      low: Math.min(openPrice, price),
-      close: price,
-      volume: tickVol,
-    });
-  }
-
-  map[symbol] = list.slice(-500);
-  saveCandlesMap(map);
 }
 
 function autoLiquidateTradesLocally(symbol: string, currentPrice: number, nowMs: number): void {
@@ -166,14 +192,32 @@ function autoLiquidateTradesLocally(symbol: string, currentPrice: number, nowMs:
   if (changed) saveStoredTrades(updated);
 }
 
-function evaluateCoinTick(coin: AdminManagedCoin, nowMs = Date.now()): {
+/**
+ * Evaluates a coin's live price purely from its Firestore anchor (`basePrice` + `schedule`)
+ * and the shared UTC second (`Math.floor(nowMs / 1000)`), ensuring every connected phone
+ * computes the exact same price to the cent at the exact same second without Math.random().
+ */
+export function evaluateCoinTick(
+  coin: AdminManagedCoin,
+  nowMs = Date.now(),
+  runSideEffects = true
+): {
   coin: AdminManagedCoin;
   persistedUpdate: boolean;
 } {
+  const utcSecMs = Math.floor(nowMs / 1000) * 1000;
   const schedule = coin.schedule;
-  let currentPrice = Number(coin.currentPrice);
-  let high24h = Number(coin.high24h);
-  let low24h = Number(coin.low24h);
+  const anchorPrice =
+    Number(coin.basePrice) > 0
+      ? Number(coin.basePrice)
+      : Number(coin.currentPrice) > 0
+        ? Number(coin.currentPrice)
+        : 100;
+
+  let currentPrice = Number(coin.currentPrice) > 0 ? Number(coin.currentPrice) : anchorPrice;
+  let nextBasePrice = anchorPrice;
+  let high24h = Number(coin.high24h) > 0 ? Number(coin.high24h) : anchorPrice;
+  let low24h = Number(coin.low24h) > 0 ? Number(coin.low24h) : anchorPrice;
   let nextSchedule = schedule;
   let persistedUpdate = false;
 
@@ -182,12 +226,16 @@ function evaluateCoinTick(coin: AdminManagedCoin, nowMs = Date.now()): {
 
   if (schedule && schedule.active) {
     if (!schedule.paused) {
-      const evaluated = computeScheduledCoinPrice({ currentPrice, schedule }, nowMs);
+      const evaluated = computeScheduledCoinPrice(
+        { currentPrice: anchorPrice, schedule },
+        utcSecMs
+      );
       currentPrice = evaluated.price;
       high24h = Math.max(high24h, currentPrice);
       low24h = Math.min(low24h, currentPrice);
 
       if (evaluated.completed) {
+        nextBasePrice = evaluated.price;
         nextSchedule = {
           ...schedule,
           active: false,
@@ -195,34 +243,40 @@ function evaluateCoinTick(coin: AdminManagedCoin, nowMs = Date.now()): {
           pausedAtMs: undefined,
         };
         persistedUpdate = true;
-      } else if (Math.abs(currentPrice - coin.currentPrice) > 0.00001) {
-        persistedUpdate = true;
       }
     }
   } else if (coin.enabled && !schedule?.paused) {
-    currentPrice = computeOrganicMarketTickPrice(currentPrice, coin.symbol, nowMs, amp, trendBias);
+    currentPrice = computeOrganicMarketTickPrice(
+      anchorPrice,
+      coin.symbol,
+      utcSecMs,
+      amp,
+      trendBias
+    );
     high24h = Math.max(high24h, currentPrice);
     low24h = Math.min(low24h, currentPrice);
   }
 
-  if (coin.enabled) {
-    recordLocalCoinCandleTick(coin.symbol, currentPrice, nowMs);
-    autoLiquidateTradesLocally(coin.symbol, currentPrice, nowMs);
+  if (runSideEffects && coin.enabled) {
+    autoLiquidateTradesLocally(coin.symbol, currentPrice, utcSecMs);
   }
 
-  const open24h = Number(coin.openPrice24h) > 0 ? Number(coin.openPrice24h) : currentPrice;
-  const changePct = open24h > 0 ? Number((((currentPrice - open24h) / open24h) * 100).toFixed(2)) : 0;
+  const open24h = Number(coin.openPrice24h) > 0 ? Number(coin.openPrice24h) : nextBasePrice;
+  const changePct =
+    open24h > 0 ? Number((((currentPrice - open24h) / open24h) * 100).toFixed(2)) : 0;
 
   return {
     coin: {
       ...coin,
+      basePrice: nextBasePrice,
+      targetPrice: coin.targetPrice ?? nextBasePrice,
       currentPrice,
       openPrice24h: open24h,
       changePct,
       high24h,
       low24h,
       schedule: nextSchedule,
-      updatedAtMs: persistedUpdate ? nowMs : coin.updatedAtMs,
+      updatedAtMs: persistedUpdate ? utcSecMs : coin.updatedAtMs,
     },
     persistedUpdate,
   };
@@ -231,7 +285,11 @@ function evaluateCoinTick(coin: AdminManagedCoin, nowMs = Date.now()): {
 async function mirrorCoinToFirestore(coin: AdminManagedCoin): Promise<void> {
   if (!isFirebaseConfigured || !db) return;
   try {
-    await setDoc(doc(db, 'customCoins', coin.symbol), coin);
+    await setDoc(doc(db, CUSTOM_COINS_COLLECTION, coin.symbol), {
+      ...coin,
+      basePrice: coin.basePrice ?? coin.currentPrice,
+      targetPrice: coin.targetPrice ?? coin.basePrice ?? coin.currentPrice,
+    });
   } catch {
     // Graceful localStorage fallback
   }
@@ -240,35 +298,118 @@ async function mirrorCoinToFirestore(coin: AdminManagedCoin): Promise<void> {
 async function deleteCoinFromFirestore(symbol: string): Promise<void> {
   if (!isFirebaseConfigured || !db) return;
   try {
-    await deleteDoc(doc(db, 'customCoins', symbol));
+    await deleteDoc(doc(db, CUSTOM_COINS_COLLECTION, symbol));
   } catch {
     // Graceful localStorage fallback
   }
 }
 
 export function getInitialAdminCoinsSync(includeDisabled = false): AdminManagedCoin[] {
-  const coins = readStoredCoins();
+  const nowMs = Date.now();
+  const coins = readStoredCoins().map((c) => evaluateCoinTick(c, nowMs, false).coin);
   return includeDisabled ? coins : coins.filter((c) => c.enabled);
 }
 
-export async function syncAndListCustomCoinsStatic(includeDisabled = false): Promise<AdminManagedCoin[]> {
+/**
+ * Re-evaluates the already-synced custom coins deterministically for the current UTC second
+ * without overwriting Firestore anchor prices or trusting stale cache timestamps.
+ */
+export function evaluateCustomCoinsForCurrentSecondStatic(
+  includeDisabled = false,
+  nowMs = Date.now()
+): AdminManagedCoin[] {
+  const coins = readStoredCoins();
+  let anyCompleted = false;
+  const nextStored: AdminManagedCoin[] = [];
+  const evaluatedList: AdminManagedCoin[] = [];
+
+  for (const rawCoin of coins) {
+    const res = evaluateCoinTick(rawCoin, nowMs, true);
+    evaluatedList.push(res.coin);
+    if (res.persistedUpdate) {
+      anyCompleted = true;
+      nextStored.push(res.coin);
+    } else {
+      nextStored.push(rawCoin);
+    }
+  }
+
+  if (anyCompleted) {
+    saveStoredCoins(nextStored);
+  }
+
+  return includeDisabled ? evaluatedList : evaluatedList.filter((c) => c.enabled);
+}
+
+/**
+ * Real-time Firestore listener (`onSnapshot`) on the shared `custom_coins` collection.
+ * Always prioritizes and overwrites any stale `localStorage` coins/prices with the live
+ * Firestore snapshot so all connected devices reflect Admin price updates immediately.
+ */
+export function subscribeToCustomCoinsStatic(
+  includeDisabled: boolean,
+  onCoins: (coins: AdminManagedCoin[]) => void
+): () => void {
+  if (!isFirebaseConfigured || !db) {
+    onCoins(evaluateCustomCoinsForCurrentSecondStatic(includeDisabled));
+    return () => {};
+  }
+
+  const colRef = collection(db, CUSTOM_COINS_COLLECTION);
+  const unsub = onSnapshot(
+    colRef,
+    (snap) => {
+      if (!snap.empty) {
+        const remoteCoins: AdminManagedCoin[] = [];
+        snap.forEach((docSnap) => {
+          const parsed = normalizeAdminCoinDoc(
+            docSnap.data() as Record<string, unknown>,
+            docSnap.id
+          );
+          if (parsed) remoteCoins.push(parsed);
+        });
+        if (remoteCoins.length > 0) {
+          saveStoredCoins(remoteCoins);
+          const nowMs = Date.now();
+          const evaluated = remoteCoins.map((c) => evaluateCoinTick(c, nowMs, true).coin);
+          onCoins(includeDisabled ? evaluated : evaluated.filter((c) => c.enabled));
+          return;
+        }
+      } else {
+        const seeded = readStoredCoins();
+        void Promise.all(seeded.map((c) => mirrorCoinToFirestore(c)));
+      }
+      onCoins(evaluateCustomCoinsForCurrentSecondStatic(includeDisabled));
+    },
+    () => {
+      onCoins(evaluateCustomCoinsForCurrentSecondStatic(includeDisabled));
+    }
+  );
+
+  return unsub;
+}
+
+export async function syncAndListCustomCoinsStatic(
+  includeDisabled = false
+): Promise<AdminManagedCoin[]> {
   const nowMs = Date.now();
   let coins = readStoredCoins();
 
   if (isFirebaseConfigured && db) {
     try {
-      const snap = await getDocs(collection(db, 'customCoins'));
+      const colRef = collection(db, CUSTOM_COINS_COLLECTION);
+      const snap = await getDocsFromServer(colRef).catch(() => getDocs(colRef));
       if (!snap.empty) {
-        const map = new Map(coins.map((c) => [c.symbol, c]));
+        const remoteCoins: AdminManagedCoin[] = [];
         snap.forEach((d) => {
-          const remote = d.data() as AdminManagedCoin;
-          if (!remote?.symbol) return;
-          const local = map.get(remote.symbol);
-          if (!local || Number(remote.updatedAtMs ?? 0) > Number(local.updatedAtMs ?? 0)) {
-            map.set(remote.symbol, remote);
-          }
+          const parsed = normalizeAdminCoinDoc(d.data() as Record<string, unknown>, d.id);
+          if (parsed) remoteCoins.push(parsed);
         });
-        coins = Array.from(map.values());
+        if (remoteCoins.length > 0) {
+          // Always prioritize & overwrite any stale localStorage coin/price with live Firestore data
+          coins = remoteCoins;
+          saveStoredCoins(remoteCoins);
+        }
       } else {
         await Promise.all(coins.map((c) => mirrorCoinToFirestore(c)));
       }
@@ -277,38 +418,98 @@ export async function syncAndListCustomCoinsStatic(includeDisabled = false): Pro
     }
   }
 
-  let anyPersisted = false;
+  let anyCompleted = false;
+  const nextStored: AdminManagedCoin[] = [];
   const evaluated = coins.map((c) => {
-    const res = evaluateCoinTick(c, nowMs);
-    if (res.persistedUpdate) anyPersisted = true;
+    const res = evaluateCoinTick(c, nowMs, true);
+    if (res.persistedUpdate) {
+      anyCompleted = true;
+      nextStored.push(res.coin);
+    } else {
+      nextStored.push(c);
+    }
     return res.coin;
   });
 
-  if (anyPersisted) {
-    saveStoredCoins(evaluated);
-  } else {
-    saveStoredCoins(coins);
+  if (anyCompleted) {
+    saveStoredCoins(nextStored);
+    void Promise.all(
+      nextStored.filter((_, i) => evaluated[i]?.updatedAtMs !== coins[i]?.updatedAtMs).map(mirrorCoinToFirestore)
+    );
   }
 
   return includeDisabled ? evaluated : evaluated.filter((c) => c.enabled);
 }
 
+/**
+ * Generates deterministic UTC-aligned OHLCV klines purely from the authoritative Firestore
+ * coin (`basePrice`, `schedule`, `symbol`) and shared UTC timestamps so every connected device
+ * sees the exact same chart candles and current close price without Math.random().
+ */
 export async function getCustomCoinKlinesStatic(
   rawSymbol: string,
   timeframe: ChartTimeframe,
   limit = 360
 ): Promise<OhlcvCandle[]> {
   const { symbol } = normalizeSymbolParts(rawSymbol);
-  const coins = readStoredCoins();
+  const coins = await syncAndListCustomCoinsStatic(true);
   const target = coins.find((c) => c.symbol === symbol);
   if (!target) return [];
 
   const nowMs = Date.now();
-  const liveCoin = evaluateCoinTick(target, nowMs).coin;
-  const map = readCandlesMap();
-  const recorded1m = Array.isArray(map[symbol]) ? map[symbol] : [];
+  const utcSecMs = Math.floor(nowMs / 1000) * 1000;
+  const liveCoin = evaluateCoinTick(target, utcSecMs, false).coin;
   const safeLimit = Math.min(500, Math.max(60, Math.round(limit)));
-  return buildPersistentChartCandles(symbol, recorded1m, liveCoin.currentPrice, timeframe, safeLimit, nowMs);
+
+  const current1mBucket = getCandleBucketStartMs(utcSecMs, '1m');
+  const recent1mWindow = Math.min(
+    180,
+    Math.max(30, Math.ceil((TIMEFRAME_MS[timeframe] * 24) / 60_000))
+  );
+
+  // Sample 1-minute buckets deterministically from the coin's shared basePrice & schedule
+  const deterministic1mBars: OhlcvCandle[] = [];
+  const sampleBaseCoin: AdminManagedCoin = {
+    ...target,
+    basePrice: target.basePrice ?? target.currentPrice,
+    schedule:
+      target.schedule && target.schedule.active
+        ? target.schedule
+        : null,
+  };
+
+  for (let idx = recent1mWindow - 1; idx >= 0; idx--) {
+    const bucketStart = current1mBucket - idx * 60_000;
+    const tOpen = evaluateCoinTick(sampleBaseCoin, bucketStart, false).coin.currentPrice;
+    const tQ1 = evaluateCoinTick(sampleBaseCoin, bucketStart + 15_000, false).coin.currentPrice;
+    const tQ2 = evaluateCoinTick(sampleBaseCoin, bucketStart + 30_000, false).coin.currentPrice;
+    const tQ3 = evaluateCoinTick(sampleBaseCoin, bucketStart + 45_000, false).coin.currentPrice;
+    const tClose =
+      idx === 0
+        ? liveCoin.currentPrice
+        : evaluateCoinTick(sampleBaseCoin, bucketStart + 59_000, false).coin.currentPrice;
+
+    const high = Math.max(tOpen, tQ1, tQ2, tQ3, tClose);
+    const low = Math.min(tOpen, tQ1, tQ2, tQ3, tClose);
+    const vol = Number((Math.max(12, Math.abs(tClose - tOpen) * 65 + 18)).toFixed(2));
+    deterministic1mBars.push({
+      time: bucketStart,
+      open: tOpen,
+      high,
+      low,
+      close: tClose,
+      volume: vol,
+    });
+  }
+
+  return buildPersistentChartCandles(
+    symbol,
+    deterministic1mBars,
+    liveCoin.currentPrice,
+    timeframe,
+    safeLimit,
+    utcSecMs
+  );
 }
 
 export async function upsertCustomCoinStatic(params: {
@@ -318,7 +519,8 @@ export async function upsertCustomCoinStatic(params: {
   enabled?: boolean;
 }): Promise<AdminManagedCoin> {
   const { symbol, label, shortName } = normalizeSymbolParts(params.symbol, params.label);
-  const safePrice = Number.isFinite(params.initialPrice) && params.initialPrice > 0 ? params.initialPrice : 100;
+  const safePrice =
+    Number.isFinite(params.initialPrice) && params.initialPrice > 0 ? params.initialPrice : 100;
   const enabled = params.enabled ?? true;
   const nowMs = Date.now();
 
@@ -330,6 +532,8 @@ export async function upsertCustomCoinStatic(params: {
         ...existing,
         label,
         shortName,
+        basePrice: safePrice,
+        targetPrice: safePrice,
         currentPrice: safePrice,
         openPrice24h: safePrice,
         changePct: 0,
@@ -343,6 +547,8 @@ export async function upsertCustomCoinStatic(params: {
         symbol,
         label,
         shortName,
+        basePrice: safePrice,
+        targetPrice: safePrice,
         currentPrice: safePrice,
         openPrice24h: safePrice,
         changePct: 0,
@@ -358,20 +564,16 @@ export async function upsertCustomCoinStatic(params: {
     : [savedCoin, ...coins];
   saveStoredCoins(nextList);
   await mirrorCoinToFirestore(savedCoin);
-  return evaluateCoinTick(savedCoin, nowMs).coin;
+  return evaluateCoinTick(savedCoin, nowMs, false).coin;
 }
 
 export async function deleteCustomCoinStatic(rawSymbol: string): Promise<boolean> {
   const { symbol } = normalizeSymbolParts(rawSymbol);
-  lastRecordedCandleBySymbol.delete(symbol);
   const coins = readStoredCoins();
   const exists = coins.some((c) => c.symbol === symbol);
   if (!exists) return false;
 
   saveStoredCoins(coins.filter((c) => c.symbol !== symbol));
-  const candles = readCandlesMap();
-  delete candles[symbol];
-  saveCandlesMap(candles);
   await deleteCoinFromFirestore(symbol);
   return true;
 }
@@ -401,12 +603,15 @@ export async function updateCoinPriceControlStatic(
 
   const nowMs = Date.now();
   const existing = coins[idx];
-  const currentEvaluated = evaluateCoinTick(existing, nowMs).coin;
+  const currentEvaluated = evaluateCoinTick(existing, nowMs, false).coin;
   const existingSched = currentEvaluated.schedule;
   const nextTrendBias: CoinTrendBias = payload.trendBias ?? existingSched?.trendBias ?? 'neutral';
-  const nextVolatility: CoinVolatilityLevel = payload.volatilityLevel ?? existingSched?.volatilityLevel ?? 'normal';
+  const nextVolatility: CoinVolatilityLevel =
+    payload.volatilityLevel ?? existingSched?.volatilityLevel ?? 'normal';
 
   let nextPrice = currentEvaluated.currentPrice;
+  let nextBasePrice = nextPrice;
+  let nextTargetPrice: number | null = existing.targetPrice ?? nextPrice;
   const nextOpen = payload.resetBaseline ? nextPrice : Number(existing.openPrice24h);
   let nextHigh = payload.resetBaseline ? nextPrice : currentEvaluated.high24h;
   let nextLow = payload.resetBaseline ? nextPrice : currentEvaluated.low24h;
@@ -440,6 +645,7 @@ export async function updateCoinPriceControlStatic(
     const targetPrice = formatRoundedPrice(
       Math.max(0.0001, currentEvaluated.currentPrice * (1 + payload.deltaPct / 100))
     );
+    nextTargetPrice = targetPrice;
     if (transitionSec > 0) {
       nextSchedule = {
         mode: 'glide_to_target',
@@ -457,6 +663,7 @@ export async function updateCoinPriceControlStatic(
       };
     } else {
       nextPrice = targetPrice;
+      nextBasePrice = targetPrice;
       nextHigh = Math.max(nextHigh, nextPrice);
       nextLow = Math.min(nextLow, nextPrice);
       nextSchedule = {
@@ -479,6 +686,7 @@ export async function updateCoinPriceControlStatic(
     payload.manualPrice > 0
   ) {
     const targetPrice = formatRoundedPrice(payload.manualPrice);
+    nextTargetPrice = targetPrice;
     const glideDur = payload.mode === 'glide_to_target' ? Math.max(1, transitionSec || 30) : transitionSec;
     if (glideDur > 0) {
       nextSchedule = {
@@ -497,6 +705,7 @@ export async function updateCoinPriceControlStatic(
       };
     } else {
       nextPrice = targetPrice;
+      nextBasePrice = targetPrice;
       nextHigh = Math.max(nextHigh, nextPrice);
       nextLow = Math.min(nextLow, nextPrice);
       nextSchedule = {
@@ -532,6 +741,8 @@ export async function updateCoinPriceControlStatic(
       };
     }
   } else if (payload.mode === 'stop') {
+    nextBasePrice = nextPrice;
+    nextTargetPrice = nextPrice;
     nextSchedule = {
       ...(nextSchedule ?? {
         mode: 'manual',
@@ -558,6 +769,7 @@ export async function updateCoinPriceControlStatic(
       typeof payload.downTargetPrice === 'number' && payload.downTargetPrice > 0
         ? payload.downTargetPrice
         : Number((nextPrice * 0.78).toFixed(3));
+    nextTargetPrice = downTarget;
     nextSchedule = {
       mode: 'up_then_down',
       startedAtMs: nowMs,
@@ -577,6 +789,7 @@ export async function updateCoinPriceControlStatic(
       typeof payload.downTargetPrice === 'number' && payload.downTargetPrice > 0
         ? payload.downTargetPrice
         : Number((nextPrice * 0.75).toFixed(3));
+    nextTargetPrice = downTarget;
     nextSchedule = {
       mode: 'down_sweep',
       startedAtMs: nowMs,
@@ -590,11 +803,16 @@ export async function updateCoinPriceControlStatic(
       volatilityLevel: nextVolatility,
       active: true,
     };
+  } else {
+    // Applying trendBias / volatilityLevel / enabled toggle only: keep existing anchor
+    nextBasePrice = Number(existing.basePrice ?? nextPrice);
   }
 
   const changePct = nextOpen > 0 ? Number((((nextPrice - nextOpen) / nextOpen) * 100).toFixed(2)) : 0;
   const updated: AdminManagedCoin = {
     ...existing,
+    basePrice: nextBasePrice,
+    targetPrice: nextTargetPrice,
     currentPrice: nextPrice,
     openPrice24h: nextOpen,
     changePct,
@@ -609,7 +827,7 @@ export async function updateCoinPriceControlStatic(
   nextList[idx] = updated;
   saveStoredCoins(nextList);
   await mirrorCoinToFirestore(updated);
-  return evaluateCoinTick(updated, nowMs).coin;
+  return evaluateCoinTick(updated, nowMs, false).coin;
 }
 
 export async function recordCoinTradeStatic(params: {

@@ -20,7 +20,10 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import type { MarketQuote, MarketSymbol } from '../types';
-import { getCustomCoinKlinesStatic } from '../services/coinsService';
+import {
+  getCustomCoinKlinesStatic,
+  subscribeToCustomCoinsStatic,
+} from '../services/coinsService';
 import {
   type ChartTimeframe,
   type OhlcvCandle,
@@ -87,7 +90,13 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   const pairPickerRef = useRef<HTMLDivElement | null>(null);
 
   const [candles, setCandles] = useState<OhlcvCandle[]>(() =>
-    generateRealisticCandles(quote.symbol, quote.price, '15m', TOTAL_CANDLES)
+    generateRealisticCandles(
+      quote.symbol,
+      quote.price,
+      '15m',
+      TOTAL_CANDLES,
+      getCandleBucketStartMs(Date.now(), '15m')
+    )
   );
   const [dataSource, setDataSource] = useState<'live' | 'sim'>('sim');
 
@@ -221,16 +230,25 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     setTickSize(getTickOptionsForPrice(livePriceRef.current)[0]);
   }, [quote.symbol]);
 
-  // Load historical klines from Cloud SQL (for custom coins) or Binance REST API (for BTC/ETH/SOL)
+  // Load historical klines from Firestore custom_coins (for custom/official coins) or Binance REST API (for BTC/ETH/SOL)
   useEffect(() => {
     const controller = new AbortController();
     const binanceSym = getBinanceKlineSymbol(quote.symbol);
     const binanceInterval = getBinanceKlineInterval(timeframe);
     let syncTimer: ReturnType<typeof setInterval> | null = null;
+    let unsubCustomCoins: (() => void) | null = null;
 
     const loadCustomCoinCandles = async (isInitialLoad: boolean) => {
       if (isInitialLoad) {
-        setCandles(generateRealisticCandles(quote.symbol, livePriceRef.current, timeframe, TOTAL_CANDLES));
+        setCandles(
+          generateRealisticCandles(
+            quote.symbol,
+            livePriceRef.current,
+            timeframe,
+            TOTAL_CANDLES,
+            getCandleBucketStartMs(Date.now(), timeframe)
+          )
+        );
         setDataSource('live');
       }
       try {
@@ -247,13 +265,26 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     const loadCandles = async () => {
       if (quote.isCustom) {
         await loadCustomCoinCandles(true);
+        unsubCustomCoins = subscribeToCustomCoinsStatic(true, () => {
+          if (!controller.signal.aborted) {
+            void loadCustomCoinCandles(false);
+          }
+        });
         syncTimer = setInterval(() => {
-          loadCustomCoinCandles(false);
+          void loadCustomCoinCandles(false);
         }, 15_000);
         return;
       }
 
-      setCandles(generateRealisticCandles(quote.symbol, livePriceRef.current, timeframe, TOTAL_CANDLES));
+      setCandles(
+        generateRealisticCandles(
+          quote.symbol,
+          livePriceRef.current,
+          timeframe,
+          TOTAL_CANDLES,
+          getCandleBucketStartMs(Date.now(), timeframe)
+        )
+      );
       setDataSource('sim');
 
       if (!binanceSym) return;
@@ -288,6 +319,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     loadCandles();
     return () => {
       controller.abort();
+      if (unsubCustomCoins) unsubCustomCoins();
       if (syncTimer) clearInterval(syncTimer);
     };
   }, [quote.symbol, quote.isCustom, timeframe]);
@@ -296,7 +328,13 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   useEffect(() => {
     setCandles((prev) => {
       if (prev.length === 0) {
-        return generateRealisticCandles(quote.symbol, quote.price, timeframe, TOTAL_CANDLES);
+        return generateRealisticCandles(
+          quote.symbol,
+          quote.price,
+          timeframe,
+          TOTAL_CANDLES,
+          getCandleBucketStartMs(Date.now(), timeframe)
+        );
       }
       const last = prev[prev.length - 1];
       const now = Date.now();

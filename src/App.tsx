@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
+  getRedirectResult,
   onAuthStateChanged,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from 'firebase/auth';
 import {
@@ -66,13 +68,19 @@ import {
 import {
   claimAdminCoinProfitStatic,
   deleteCustomCoinStatic,
+  evaluateCustomCoinsForCurrentSecondStatic,
   getCoinTradeAnalyticsStatic,
   getInitialAdminCoinsSync,
   recordCoinTradeStatic,
+  subscribeToCustomCoinsStatic,
   syncAndListCustomCoinsStatic,
   updateCoinPriceControlStatic,
   upsertCustomCoinStatic,
 } from './services/coinsService';
+import {
+  executeDirectP2PTransfer,
+  lookupTransferRecipientDirect,
+} from './services/transferEngine';
 import {
   adminScheduleDigitDrawStatic,
   getInitialLotteryLiveState,
@@ -96,13 +104,11 @@ import {
   assignMemberRoleStatic,
   authenticateStaticAdmin,
   createWalletRequestStatic,
-  executeP2PTransferStatic,
   getInitialPlatformSettingsSync,
   getMemberWalletSyncStatic,
   listMembersStatic,
   listStaffRequestsStatic,
   loadPublicPlatformSettingsStatic,
-  lookupTransferRecipientStatic,
   rejectDepositRequestStatic,
   rejectWithdrawalRequestStatic,
   saveBrandLogoStatic,
@@ -152,6 +158,7 @@ import {
   calculateUnrealizedPnl,
   canClearWithdrawLock,
   checkOrderDirectionConflict,
+  computeOrganicMarketTickPrice,
   evaluatePositionAutoClose,
   evaluateWithdrawalEligibility,
   getNumericLiqPrice,
@@ -611,6 +618,21 @@ export default function App() {
     const unsubAuth = auth ? onAuthStateChanged(auth, handleFirebaseUser) : () => {};
     const unsubOAuth = oauthAuth && oauthAuth !== auth ? onAuthStateChanged(oauthAuth, handleFirebaseUser) : () => {};
 
+    if (isOAuthFirebaseConfigured && oauthAuth) {
+      getRedirectResult(oauthAuth)
+        .then((result) => {
+          if (result?.user) {
+            showToast('Signed in with Google.');
+          }
+        })
+        .catch((err: unknown) => {
+          const code = (err as { code?: string } | null)?.code;
+          if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+            return;
+          }
+        });
+    }
+
     return () => {
       unsubAuth();
       unsubOAuth();
@@ -833,22 +855,28 @@ export default function App() {
     }
 
     const fallbackInterval = setInterval(() => {
+      const utcSecMs = Math.floor(Date.now() / 1000) * 1000;
       setQuotes((prev) =>
         prev.map((q) => {
           if (q.isCustom) return q;
           if (wsActive && q.symbol !== 'USOIL') return q;
-          const delta = (Math.random() - 0.495) * q.price * 0.0012;
-          const decimals = q.price < 1 ? 4 : q.price < 10 ? 3 : 2;
-          const minFloor = q.price < 1 ? 0.0001 : 0.1;
-          const nextPrice = Math.max(minFloor, Number((q.price + delta).toFixed(decimals)));
+          const seedQuote = INITIAL_QUOTES.find((base) => base.symbol === q.symbol);
+          const anchorPrice = seedQuote?.price ?? q.price;
+          const nextPrice = computeOrganicMarketTickPrice(
+            anchorPrice,
+            q.symbol,
+            utcSecMs,
+            q.symbol === 'USOIL' ? 0.004 : 0.0028,
+            'neutral'
+          );
           return {
             ...q,
             price: nextPrice,
-            changePct: Number((q.changePct + (delta / q.price) * 100).toFixed(2)),
+            changePct: anchorPrice > 0 ? Number((((nextPrice - anchorPrice) / anchorPrice) * 100).toFixed(2)) : q.changePct,
           };
         })
       );
-    }, 2500);
+    }, 1000);
 
     return () => {
       controller.abort();
@@ -857,45 +885,46 @@ export default function App() {
     };
   }, []);
 
-  // Sync Admin-managed Custom Coins (e.g., XU/USDT) live via Firestore + localStorage
+  // Subscribe to shared Firestore "custom_coins" in real time (overwriting stale localStorage) & tick deterministically every UTC second
   useEffect(() => {
-    let cancelled = false;
-    const syncCustomCoins = async () => {
-      try {
-        const coins = await syncAndListCustomCoinsStatic(false);
-        if (cancelled) return;
-        setQuotes((prev) => {
-          const builtIn = prev.filter((q) => !q.isCustom);
-          return mergeBuiltInAndCustomQuotes(builtIn, coins);
-        });
-      } catch {
-        // Keep current quotes cleanly
-      }
+    const applyCoinSnapshot = (coins: AdminManagedCoin[]) => {
+      setAdminCoins(coins);
+      const enabledCoins = coins.filter((c) => c.enabled);
+      setQuotes((prev) => {
+        const builtIn = prev.filter((q) => !q.isCustom);
+        return mergeBuiltInAndCustomQuotes(builtIn, enabledCoins);
+      });
     };
 
-    syncCustomCoins();
-    const timer = setInterval(syncCustomCoins, 1000);
+    const unsubCoins = subscribeToCustomCoinsStatic(true, applyCoinSnapshot);
+    const timer = setInterval(() => {
+      applyCoinSnapshot(evaluateCustomCoinsForCurrentSecondStatic(true, Date.now()));
+    }, 1000);
+
     return () => {
-      cancelled = true;
+      unsubCoins();
       clearInterval(timer);
     };
   }, []);
 
-  // Landing Live Feed Stream rotation
+  // Deterministic Landing Live Feed Stream rotation synced across clients by UTC time slot
   useEffect(() => {
     if (user.isLoggedIn) return;
     const methods = ['KBZPay', 'WavePay', 'USDT TRC20', 'Bank Transfer'];
     const id = setInterval(() => {
-      const isWithdraw = Math.random() > 0.4;
-      const method = methods[Math.floor(Math.random() * methods.length)];
-      const amount = Math.floor(Math.random() * 880) + 120;
+      const slot = Math.floor(Date.now() / 4500);
+      const isWithdraw = slot % 3 === 0;
+      const method = methods[slot % methods.length];
+      const amount = 120 + ((slot * 173) % 880);
+      const hexA = ((slot * 4919) & 0xffff).toString(16).padStart(4, '0');
+      const hexB = ((slot * 7919) & 0xfff).toString(16).padStart(3, '0');
       const masked =
         method === 'USDT TRC20'
-          ? `0x${Math.random().toString(16).slice(2, 6)}...${Math.random().toString(16).slice(2, 5)}`
-          : `09${Math.floor(Math.random() * 8 + 1)}***${Math.floor(Math.random() * 899 + 100)}`;
+          ? `0x${hexA}...${hexB}`
+          : `09${(slot % 8) + 1}***${100 + ((slot * 97) % 899)}`;
       setLiveFeedItems((prev) => [
         {
-          id: `${Date.now()}`,
+          id: `${slot}`,
           type: isWithdraw ? 'WITHDRAWAL' : 'DEPOSIT',
           method,
           amount,
@@ -2013,7 +2042,32 @@ export default function App() {
       await signInWithPopup(oauthAuth, googleAuthProvider);
       showToast('Signed in with Google.');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Google Sign-In failed.';
+      const fbErr = err as { code?: string; message?: string } | null;
+      const code = fbErr?.code ?? '';
+
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        return;
+      }
+
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment'
+      ) {
+        try {
+          await signInWithRedirect(oauthAuth, googleAuthProvider);
+          return;
+        } catch (redirectErr: unknown) {
+          const rCode = (redirectErr as { code?: string } | null)?.code;
+          if (rCode === 'auth/popup-closed-by-user' || rCode === 'auth/cancelled-popup-request') {
+            return;
+          }
+          const rMsg = redirectErr instanceof Error ? redirectErr.message : 'Google Sign-In failed.';
+          showToast(rMsg, 'error');
+          return;
+        }
+      }
+
+      const msg = fbErr?.message || 'Google Sign-In failed.';
       showToast(msg, 'error');
     }
   };
@@ -2598,11 +2652,14 @@ export default function App() {
       if (!trimmed) {
         return { ok: false, error: 'Enter recipient UID or email.' };
       }
-      if (trimmed === user.uid || trimmed.toLowerCase() === user.email.toLowerCase()) {
+      if (
+        trimmed.toLowerCase() === user.uid.toLowerCase() ||
+        trimmed.toLowerCase() === user.email.toLowerCase()
+      ) {
         return { ok: false, error: 'Cannot transfer to your own account.' };
       }
 
-      const found = await lookupTransferRecipientStatic(trimmed);
+      const found = await lookupTransferRecipientDirect(trimmed);
       if (found) {
         return { ok: true, recipient: found };
       }
@@ -2616,30 +2673,34 @@ export default function App() {
     amount: number,
     pin: string
   ): Promise<{ ok: boolean; error?: string }> => {
+    const transferMode: AccountMode = 'real';
     if (pin !== user.pin) {
       showToast('Incorrect 4-digit Security PIN.', 'error');
       return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
     }
-    const avail = accountMode === 'demo' ? user.demoBalance : user.realBalance;
+    const avail = user.realBalance;
     if (!Number.isFinite(amount) || amount < 1 || amount > avail) {
       const msg =
         amount < 1
           ? 'Minimum transfer amount is $1.00.'
-          : `Insufficient ${accountMode.toUpperCase()} balance.`;
+          : 'Insufficient REAL balance.';
       showToast(msg, 'error');
       return { ok: false, error: msg };
     }
-    if (recipient === user.uid || recipient.toLowerCase() === user.email.toLowerCase()) {
+    if (
+      recipient.trim().toLowerCase() === user.uid.toLowerCase() ||
+      recipient.trim().toLowerCase() === user.email.toLowerCase()
+    ) {
       showToast('Cannot transfer to your own account.', 'error');
       return { ok: false, error: 'Cannot transfer to your own account.' };
     }
 
-    const result = await executeP2PTransferStatic({
+    const result = await executeDirectP2PTransfer({
       senderUid: user.uid,
       senderEmail: user.email,
       senderUsername: user.username,
       recipientIdentifier: recipient,
-      accountMode,
+      accountMode: transferMode,
       amount,
       pin,
       isLocalDemoSession: user.isLocalDemoSession,
@@ -2662,8 +2723,7 @@ export default function App() {
 
     setUser((prev) => ({
       ...prev,
-      demoBalance: accountMode === 'demo' ? nextSenderBalance : prev.demoBalance,
-      realBalance: accountMode === 'real' ? nextSenderBalance : prev.realBalance,
+      realBalance: nextSenderBalance,
     }));
 
     setManagedMembers((prev) =>
@@ -2676,10 +2736,7 @@ export default function App() {
         }
         return {
           ...m,
-          realBalance:
-            accountMode === 'real' ? nextRecipientBalance : m.realBalance,
-          demoBalance:
-            accountMode === 'demo' ? nextRecipientBalance : m.demoBalance,
+          realBalance: nextRecipientBalance,
         };
       })
     );
@@ -3643,8 +3700,8 @@ export default function App() {
 
       {transferModalOpen && (
         <TransferModal
-          accountMode={accountMode}
-          availableBalance={availableBalance}
+          accountMode="real"
+          availableBalance={user.realBalance}
           currentUserUid={user.uid}
           currentUserEmail={user.email}
           userPin={user.pin}

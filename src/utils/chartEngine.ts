@@ -90,6 +90,7 @@ export function generateRealisticCandles(
     closes[i] = Math.max(0.01, closes[i + 1] / (1 + pctDelta));
   }
 
+  const alignedEndMs = getCandleBucketStartMs(nowMs, timeframe);
   const candles: OhlcvCandle[] = [];
   for (let i = 0; i < count; i++) {
     const close = closes[i];
@@ -106,7 +107,7 @@ export function generateRealisticCandles(
     );
 
     candles.push({
-      time: nowMs - (count - 1 - i) * stepMs,
+      time: alignedEndMs - (count - 1 - i) * stepMs,
       open,
       high,
       low,

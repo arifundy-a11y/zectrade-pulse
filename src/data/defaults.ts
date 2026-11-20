@@ -150,6 +150,8 @@ export function createDefaultAdminCoins(nowMs = Date.now()): AdminManagedCoin[] 
       symbol: 'XUUSDT',
       label: 'XU / USDT',
       shortName: 'XU/USDT',
+      basePrice: 100.0,
+      targetPrice: 100.0,
       currentPrice: 100.0,
       openPrice24h: 98.5,
       changePct: 1.52,

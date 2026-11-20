@@ -1,8 +1,11 @@
 import { beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  CUSTOM_COINS_COLLECTION,
   claimAdminCoinProfitStatic,
   deleteCustomCoinStatic,
+  evaluateCoinTick,
+  evaluateCustomCoinsForCurrentSecondStatic,
   getCoinTradeAnalyticsStatic,
   getCustomCoinKlinesStatic,
   getInitialAdminCoinsSync,
@@ -11,6 +14,10 @@ import {
   updateCoinPriceControlStatic,
   upsertCustomCoinStatic,
 } from './coinsService';
+import {
+  executeDirectP2PTransfer,
+  lookupTransferRecipientDirect,
+} from './transferEngine';
 import {
   adminScheduleDigitDrawStatic,
   getInitialLotteryLiveState,
@@ -57,11 +64,12 @@ describe('Synchronous built-in defaults for instant Netlify startup', () => {
     assert.equal(articles[0].isFeatured, true);
   });
 
-  it('loads pre-seeded XUUSDT custom coin at $100.00 synchronously', () => {
+  it('loads pre-seeded XUUSDT custom coin anchored at $100.00 synchronously', () => {
     const coins = getInitialAdminCoinsSync(false);
     const xu = coins.find((c) => c.symbol === 'XUUSDT');
     assert.ok(xu);
-    assert.equal(xu.currentPrice, 100);
+    assert.equal(xu.basePrice, 100);
+    assert.ok(xu.currentPrice >= 99 && xu.currentPrice <= 101);
     assert.equal(xu.shortName, 'XU/USDT');
   });
 
@@ -178,6 +186,29 @@ describe('coinsService price control, klines, trades & analytics', () => {
     assert.equal(deleted, true);
     const listed = await syncAndListCustomCoinsStatic(true);
     assert.equal(listed.some((c) => c.symbol === 'XUUSDT'), false);
+  });
+
+  it('uses shared Firestore custom_coins collection and deterministic UTC-second pricing without random drift', async () => {
+    assert.equal(CUSTOM_COINS_COLLECTION, 'custom_coins');
+    const coins = getInitialAdminCoinsSync(false);
+    const xu = coins.find((c) => c.symbol === 'XUUSDT');
+    assert.ok(xu);
+
+    const fixedUtcMs = 1760000123456;
+    const sameSecLaterMs = 1760000123987;
+    const tickA = evaluateCoinTick(xu, fixedUtcMs, false).coin;
+    const tickB = evaluateCoinTick(xu, sameSecLaterMs, false).coin;
+    assert.equal(tickA.currentPrice, tickB.currentPrice);
+    assert.equal(tickA.basePrice, xu.basePrice);
+
+    const listA = evaluateCustomCoinsForCurrentSecondStatic(false, fixedUtcMs);
+    const listB = evaluateCustomCoinsForCurrentSecondStatic(false, sameSecLaterMs);
+    assert.equal(listA[0].currentPrice, listB[0].currentPrice);
+
+    const klinesA = await getCustomCoinKlinesStatic('XUUSDT', '15m', 90);
+    const klinesB = await getCustomCoinKlinesStatic('XUUSDT', '15m', 90);
+    assert.equal(klinesA.length, 90);
+    assert.deepEqual(klinesA, klinesB);
   });
 });
 
@@ -322,10 +353,13 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
     const lookupByUpperEmail = await lookupTransferRecipientStatic('MARCUS.C@ZECTRADE.IO');
     assert.equal(lookupByUpperEmail?.uid, 'USR-7731');
 
+    const directLookup = await lookupTransferRecipientDirect('MARCUS.C@ZECTRADE.IO');
+    assert.equal(directLookup?.uid, 'USR-7731');
+
     const lookupByUid = await lookupTransferRecipientStatic('USR-7731');
     assert.equal(lookupByUid?.email, 'marcus.c@zectrade.io');
 
-    const transfer = await executeP2PTransferStatic({
+    const transfer = await executeDirectP2PTransfer({
       senderUid: 'USR-9012',
       senderEmail: 'alex.chen@zectrade.io',
       senderUsername: 'AlexChen',
@@ -334,6 +368,7 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
       amount: 1,
       pin: '1234',
     });
+    assert.equal(typeof executeP2PTransferStatic, 'function');
     assert.equal(transfer.ok, true);
     if (transfer.ok) {
       assert.equal(transfer.recipient.newBalance, 8901);
