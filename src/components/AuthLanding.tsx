@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { ChevronDown, Eye, EyeOff, ArrowUpRight, ArrowDownLeft, Trophy, ShieldCheck, Layers, Info, AlertTriangle } from 'lucide-react';
 import type { FaqEntry, LiveFeedItem, MarketQuote, PlatformStats } from '../types';
+import { normalizePlatformStats } from '../utils/platformStats';
+import { AnimatedStatNumber } from './AnimatedStatNumber';
 
 interface AuthLandingProps {
   quotes: MarketQuote[];
@@ -42,6 +44,7 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [openFaqIdx, setOpenFaqIdx] = useState<number | null>(0);
+  const resolvedStats = normalizePlatformStats(platformStats);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -60,9 +63,9 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
   };
 
   return (
-    <main className="w-full max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8 space-y-8 sm:space-y-12">
+    <main className="w-full max-w-6xl mx-auto px-3 sm:px-6 py-3 sm:py-5 space-y-6 sm:space-y-8">
       {/* Compact Live Market Ticker Strip (Scrollable on Mobile) */}
-      <section aria-label="Live Market Feed" id="markets-overview" className="border-b border-slate-800/80 pb-3">
+      <section aria-label="Live Market Feed" id="markets-overview" className="border-b border-slate-800/80 pb-2.5">
         <div className="flex items-center gap-3 overflow-x-auto no-scrollbar py-1">
           {quotes.map((q) => {
             const isPos = q.changePct >= 0;
@@ -94,7 +97,7 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
       </section>
 
       {/* Hero Split: Value Proposition + Auth Form */}
-      <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-10 items-start">
+      <section className="grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-8 items-start">
         {/* Left: Overview & Platform Statistics */}
         <div className="lg:col-span-7 space-y-5">
           <div className="space-y-2.5">
@@ -125,28 +128,6 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
             >
               Contact CSR Support
             </a>
-          </div>
-
-          {/* 3-Column Platform Metrics Strip */}
-          <div className="grid grid-cols-3 gap-2.5 sm:gap-4 pt-2 border-t border-slate-800/80">
-            <div>
-              <span className="text-[10px] sm:text-xs text-slate-400 block">Registered Members</span>
-              <span className="text-sm sm:text-xl font-bold text-white font-mono tabular-nums">
-                {platformStats.membersCount.toLocaleString('en-US')}
-              </span>
-            </div>
-            <div>
-              <span className="text-[10px] sm:text-xs text-slate-400 block">Total Deposits</span>
-              <span className="text-sm sm:text-xl font-bold text-emerald-400 font-mono tabular-nums">
-                {platformStats.totalDeposits}
-              </span>
-            </div>
-            <div>
-              <span className="text-[10px] sm:text-xs text-slate-400 block">Total Withdrawals</span>
-              <span className="text-sm sm:text-xl font-bold text-amber-400 font-mono tabular-nums">
-                {platformStats.totalWithdrawals}
-              </span>
-            </div>
           </div>
 
           {/* Core Capabilities */}
@@ -348,6 +329,78 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
               {authMode === 'register' ? 'Sign In' : 'Create Account'}
             </button>
           </div>
+        </div>
+      </section>
+
+      {/* Responsive Full-Width Animated Platform Statistics Strip */}
+      <section
+        aria-label="Live Platform Statistics"
+        data-testid="landing-platform-stats"
+        className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4"
+      >
+        <div className="stat-card-shimmer relative overflow-hidden rounded-2xl bg-slate-900/75 backdrop-blur-md border border-slate-800/90 p-4 sm:p-5 flex flex-col justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-slate-400">Registered Members</span>
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-emerald-400">
+              <span className="relative flex h-2 w-2" aria-hidden="true">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.85)]" />
+              </span>
+              LIVE
+            </span>
+          </div>
+          <AnimatedStatNumber
+            value={resolvedStats.registeredMembers}
+            durationMs={1800}
+            testId="stat-registered-members"
+            ariaLabel={`Registered Members: ${resolvedStats.registeredMembers.toLocaleString('en-US')}`}
+            className="text-xl sm:text-2xl md:text-3xl font-bold tracking-tight text-white font-mono"
+          />
+          <p className="text-[11px] text-slate-500">Verified trading &amp; lottery accounts</p>
+        </div>
+
+        <div className="stat-card-shimmer relative overflow-hidden rounded-2xl bg-slate-900/75 backdrop-blur-md border border-slate-800/90 p-4 sm:p-5 flex flex-col justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-slate-400">Total Deposits</span>
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-emerald-400">
+              <span className="relative flex h-2 w-2" aria-hidden="true">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.85)]" />
+              </span>
+              LIVE
+            </span>
+          </div>
+          <AnimatedStatNumber
+            value={resolvedStats.totalDeposits}
+            prefix="$"
+            durationMs={1800}
+            testId="stat-total-deposits"
+            ariaLabel={`Total Deposits: $${resolvedStats.totalDeposits.toLocaleString('en-US')}`}
+            className="text-xl sm:text-2xl md:text-3xl font-bold tracking-tight text-emerald-400 font-mono"
+          />
+          <p className="text-[11px] text-slate-500">Cumulative mainnet wallet funding</p>
+        </div>
+
+        <div className="stat-card-shimmer relative overflow-hidden rounded-2xl bg-slate-900/75 backdrop-blur-md border border-slate-800/90 p-4 sm:p-5 flex flex-col justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-slate-400">Total Withdrawals</span>
+            <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-emerald-400">
+              <span className="relative flex h-2 w-2" aria-hidden="true">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.85)]" />
+              </span>
+              LIVE
+            </span>
+          </div>
+          <AnimatedStatNumber
+            value={resolvedStats.totalWithdrawals}
+            prefix="$"
+            durationMs={1800}
+            testId="stat-total-withdrawals"
+            ariaLabel={`Total Withdrawals: $${resolvedStats.totalWithdrawals.toLocaleString('en-US')}`}
+            className="text-xl sm:text-2xl md:text-3xl font-bold tracking-tight text-amber-400 font-mono"
+          />
+          <p className="text-[11px] text-slate-500">Processed member payouts worldwide</p>
         </div>
       </section>
 

@@ -229,6 +229,54 @@ test('evaluateWithdrawalEligibility enforces deposit, trade-after-deposit, and a
   assert.equal(canClearWithdrawLock('user'), false);
 });
 
+test('resolveHasFirstDeposit supports legacy flags/deposits while ignoring P2P transfers and honoring Admin revoke', async () => {
+  const { resolveHasFirstDeposit } = await import('./tradingEngine');
+
+  // Fresh account or user who only received P2P transfers -> false
+  assert.equal(
+    resolveHasFirstDeposit(
+      { hasFirstDeposit: false, hasDepositedBefore: false, totalDeposited: 0 },
+      [{ type: 'P2P TRANSFER RECEIVED (REAL)', status: 'SUCCESS' }]
+    ),
+    false
+  );
+
+  // Legacy user with hasDepositedBefore === true -> true
+  assert.equal(
+    resolveHasFirstDeposit({ hasDepositedBefore: true }),
+    true
+  );
+
+  // Legacy user with approved DEPOSIT transaction -> true
+  assert.equal(
+    resolveHasFirstDeposit(
+      { hasFirstDeposit: false, hasDepositedBefore: false, totalDeposited: 0 },
+      [{ type: 'DEPOSIT SUBMITTED (KPAY)', status: 'APPROVED' }]
+    ),
+    true
+  );
+
+  // Legacy user with totalDeposited > 0 -> true
+  assert.equal(
+    resolveHasFirstDeposit({ hasFirstDeposit: false, hasDepositedBefore: false, totalDeposited: 250 }),
+    true
+  );
+
+  // Admin manual revoke overrides historical flags cleanly
+  assert.equal(
+    resolveHasFirstDeposit(
+      {
+        hasFirstDeposit: false,
+        hasDepositedBefore: false,
+        totalDeposited: 250,
+        firstDepositRevokedByAdmin: true,
+      },
+      [{ type: 'DEPOSIT SUBMITTED (KPAY)', status: 'APPROVED' }]
+    ),
+    false
+  );
+});
+
 test('extractAccountTargetNumber extracts account/phone from formatted descriptions', () => {
   assert.equal(extractAccountTargetNumber('KPay - Ko Mg (09789123456)'), '09789123456');
   assert.equal(extractAccountTargetNumber('USDT TRC20 (TX98235abc)'), 'TX98235abc');

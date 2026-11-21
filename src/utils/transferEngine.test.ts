@@ -147,3 +147,21 @@ test('validateP2PTransferInput requires 6-digit 2FA code only when twoFactorEnab
   assert.equal(withValidFormat.ok, true);
 });
 
+test('validateP2PTransferInput blocks transfers when hasFirstDeposit is explicitly false', () => {
+  const blocked = validateP2PTransferInput({
+    senderUid: 'USR-1001',
+    senderEmail: 'sender@zectrade.io',
+    recipientIdentifier: 'USR-9012',
+    amount: 25,
+    availableBalance: 100,
+    pinInput: '1234',
+    expectedPin: '1234',
+    hasFirstDeposit: false,
+  });
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) {
+    assert.match(blocked.error, /First Deposit Required/i);
+  }
+});
+
+

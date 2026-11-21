@@ -113,11 +113,33 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     [targetCandleCount]
   );
 
+  const syncTailToLivePrice = useCallback((series: OhlcvCandle[], livePrice: number): OhlcvCandle[] => {
+    if (!Array.isArray(series) || series.length === 0 || !Number.isFinite(livePrice) || livePrice <= 0) {
+      return series;
+    }
+    const next = [...series];
+    const last = { ...next[next.length - 1] };
+    last.close = livePrice;
+    last.high = Math.max(last.high, livePrice);
+    last.low = Math.min(last.low, livePrice);
+    next[next.length - 1] = last;
+    return next;
+  }, []);
+
   const [candles, setCandles] = useState<OhlcvCandle[]>(() => {
     purgeStaleFlatCandleCaches();
     const cached = readCachedChartCandlesStatic(quote.symbol, '15m');
     if (cached && cached.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(cached)) {
-      return cached;
+      return cached.map((bar, idx) =>
+        idx === cached.length - 1 && quote.price > 0
+          ? {
+              ...bar,
+              close: quote.price,
+              high: Math.max(bar.high, quote.price),
+              low: Math.min(bar.low, quote.price),
+            }
+          : bar
+      );
     }
     const generated = generateRealisticCandles(
       quote.symbol,
@@ -277,6 +299,12 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     setTickSize(getTickOptionsForPrice(livePriceRef.current)[0]);
   }, [quote.symbol]);
 
+  useEffect(() => {
+    if (!tickOptions.includes(tickSize)) {
+      setTickSize(tickOptions[0]);
+    }
+  }, [tickOptions, tickSize]);
+
   // Purge any legacy or flat cached candles on mount
   useEffect(() => {
     purgeStaleFlatCandleCaches();
@@ -294,7 +322,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
       if (isInitialLoad) {
         const cached = readCachedChartCandlesStatic(quote.symbol, timeframe);
         if (cached && cached.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(cached)) {
-          setCandles(cached);
+          setCandles(syncTailToLivePrice(cached, livePriceRef.current));
         } else {
           setCandles(buildFreshWaveCandles(quote.symbol, livePriceRef.current, timeframe));
         }
@@ -304,7 +332,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         const rows = await getCustomCoinKlinesStatic(quote.symbol, timeframe, targetCandleCount);
         if (!controller.signal.aborted && rows.length > 0) {
           if (rows.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(rows)) {
-            setCandles(rows);
+            setCandles(syncTailToLivePrice(rows, livePriceRef.current));
             writeCachedChartCandlesStatic(quote.symbol, timeframe, rows);
           } else {
             const anchorClose = rows[rows.length - 1]?.close || livePriceRef.current;
@@ -333,7 +361,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
 
       const cached = readCachedChartCandlesStatic(quote.symbol, timeframe);
       if (cached && cached.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(cached)) {
-        setCandles(cached);
+        setCandles(syncTailToLivePrice(cached, livePriceRef.current));
       } else {
         setCandles(buildFreshWaveCandles(quote.symbol, livePriceRef.current, timeframe));
       }
@@ -361,8 +389,9 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         }));
         if (!controller.signal.aborted && parsed.length > 0) {
           if (parsed.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(parsed)) {
-            setCandles(parsed);
-            writeCachedChartCandlesStatic(quote.symbol, timeframe, parsed);
+            const synced = syncTailToLivePrice(parsed, livePriceRef.current);
+            setCandles(synced);
+            writeCachedChartCandlesStatic(quote.symbol, timeframe, synced);
           } else {
             const anchorClose = parsed[parsed.length - 1]?.close || livePriceRef.current;
             setCandles(buildFreshWaveCandles(quote.symbol, anchorClose, timeframe));
@@ -380,7 +409,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
       if (unsubCustomCoins) unsubCustomCoins();
       if (syncTimer) clearInterval(syncTimer);
     };
-  }, [quote.symbol, quote.isCustom, timeframe, targetCandleCount, buildFreshWaveCandles]);
+  }, [quote.symbol, quote.isCustom, timeframe, targetCandleCount, buildFreshWaveCandles, syncTailToLivePrice]);
 
   // Sync active candle with live ticks and roll strictly on exchange-standard UTC timeframe boundaries
   useEffect(() => {

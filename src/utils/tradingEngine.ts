@@ -12,6 +12,7 @@ import type {
   StaffTabId,
   UserProfile,
   UserRole,
+  WalletTransaction,
 } from '../types';
 
 export const OPEN_FEE_RATE = 0.0018; // 0.18% per trade open
@@ -450,12 +451,54 @@ export interface WithdrawalEligibilityResult {
     | 'no_trade_after_deposit';
 }
 
+export function isDepositTransactionApproved(
+  tx: { type?: string; status?: string }
+): boolean {
+  const typeUpper = String(tx.type || '').toUpperCase();
+  const statusUpper = String(tx.status || '').toUpperCase();
+  const isDepositType = typeUpper.includes('DEPOSIT') && !typeUpper.includes('TRANSFER');
+  const isApprovedStatus =
+    statusUpper === 'SUCCESS' || statusUpper === 'APPROVED' || statusUpper === 'COMPLETED';
+  return isDepositType && isApprovedStatus;
+}
+
+export function resolveHasFirstDeposit(
+  user: Partial<
+    Pick<
+      UserProfile,
+      'hasFirstDeposit' | 'hasDepositedBefore' | 'totalDeposited' | 'firstDepositRevokedByAdmin'
+    >
+  >,
+  transactions?: Array<Pick<WalletTransaction, 'type' | 'status'>>
+): boolean {
+  if (user.firstDepositRevokedByAdmin) {
+    return Boolean(user.hasFirstDeposit);
+  }
+  if (user.hasFirstDeposit === true || user.hasDepositedBefore === true) {
+    return true;
+  }
+  if (
+    typeof user.totalDeposited === 'number' &&
+    Number.isFinite(user.totalDeposited) &&
+    user.totalDeposited > 0
+  ) {
+    return true;
+  }
+  if (Array.isArray(transactions) && transactions.some((tx) => isDepositTransactionApproved(tx))) {
+    return true;
+  }
+  return false;
+}
+
 export function evaluateWithdrawalEligibility(
   user: Pick<
     UserProfile,
     | 'isBlocked'
     | 'isWithdrawBlocked'
     | 'hasDepositedBefore'
+    | 'hasFirstDeposit'
+    | 'totalDeposited'
+    | 'firstDepositRevokedByAdmin'
     | 'hasTradedAfterDeposit'
     | 'withdrawLockClearedByAdmin'
   >
@@ -481,7 +524,7 @@ export function evaluateWithdrawalEligibility(
       lockType: 'none',
     };
   }
-  if (!user.hasDepositedBefore) {
+  if (!resolveHasFirstDeposit(user)) {
     return {
       allowed: false,
       reason: 'Please make your first deposit to withdraw funds.',

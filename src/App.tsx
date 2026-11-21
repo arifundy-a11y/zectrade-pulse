@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
   getRedirectResult,
@@ -51,6 +51,7 @@ import { WalletWorkspace } from './components/WalletWorkspace';
 import {
   deduplicateFirestoreAgainstSql,
 } from './utils/depositHistory';
+import { appendDeterministicLiveFeedItem } from './utils/liveFeed';
 import { verifyTotpCode } from './utils/twoFactor';
 import {
   auth,
@@ -108,6 +109,7 @@ import {
   createWalletRequestStatic,
   getInitialPlatformSettingsSync,
   getMemberWalletSyncStatic,
+  incrementPlatformStatsForActivityStatic,
   listMembersStatic,
   listStaffRequestsStatic,
   loadPublicPlatformSettingsStatic,
@@ -116,6 +118,8 @@ import {
   saveBrandLogoStatic,
   saveFaqAndDescStatic,
   savePlatformSettingsStatic,
+  savePlatformStatsOnlyStatic,
+  subscribePlatformStatsStatic,
   syncMemberOnAuthStatic,
   updateMemberFieldsStatic,
 } from './services/walletAdminService';
@@ -160,14 +164,26 @@ import {
   calculateUnrealizedPnl,
   canClearWithdrawLock,
   checkOrderDirectionConflict,
-  computeOrganicMarketTickPrice,
   evaluatePositionAutoClose,
   evaluateWithdrawalEligibility,
   getNumericLiqPrice,
+  resolveHasFirstDeposit,
   shouldTriggerPreOrder,
   shouldTriggerPriceAlert,
   validateSlTpTargets,
 } from './utils/tradingEngine';
+import {
+  BINANCE_COMBINED_STREAM_URL,
+  BINANCE_REST_TICKER_URL,
+  COINBASE_EXCHANGE_RATES_URL,
+  SharedMarketAnchor,
+  applyLiveMarketTicks,
+  evaluateDeterministicFallbackQuotes,
+  parseBinanceMiniTickerPayload,
+  parseBinanceRestTicker24hr,
+  parseCoinbaseExchangeRates,
+} from './utils/marketFeed';
+import { FIRST_DEPOSIT_REQUIRED_MESSAGE } from './utils/transferEngine';
 
 const STORAGE_KEY = 'zectrade_pulse_workspace_v1';
 
@@ -248,6 +264,11 @@ export default function App() {
       return SEED_MANAGED_MEMBERS;
     }
   });
+
+  const effectiveHasFirstDeposit = useMemo(
+    () => resolveHasFirstDeposit(user, walletTransactions),
+    [user, walletTransactions]
+  );
 
   const initialPlatform = getInitialPlatformSettingsSync();
   const [csrTelegramLink, setCsrTelegramLink] = useState(initialPlatform.csrTelegramLink);
@@ -390,6 +411,10 @@ export default function App() {
       }
     };
     loadPublicSettings();
+    const unsubPlatformStats = subscribePlatformStatsStatic((nextStats) => {
+      setPlatformStats(nextStats);
+    });
+    return () => unsubPlatformStats();
   }, []);
 
   const authTokenRef = useRef<string | null>(null);
@@ -420,6 +445,15 @@ export default function App() {
                   ? syncData.securityPin
                   : prev.pin,
               hasDepositedBefore: Boolean(syncData.hasDepositedBefore),
+              hasFirstDeposit: syncData.hasFirstDeposit ?? Boolean(syncData.hasDepositedBefore),
+              totalDeposited:
+                typeof syncData.totalDeposited === 'number' && Number.isFinite(syncData.totalDeposited)
+                  ? syncData.totalDeposited
+                  : prev.totalDeposited ?? 0,
+              firstDepositRevokedByAdmin:
+                typeof syncData.firstDepositRevokedByAdmin === 'boolean'
+                  ? syncData.firstDepositRevokedByAdmin
+                  : prev.firstDepositRevokedByAdmin ?? false,
               hasTradedAfterDeposit: Boolean(syncData.hasTradedAfterDeposit),
               withdrawLockClearedByAdmin: Boolean(syncData.withdrawLockClearedByAdmin),
               isWithdrawBlocked: Boolean(syncData.isWithdrawBlocked),
@@ -481,6 +515,15 @@ export default function App() {
             realBalance: updated.realBalance,
             demoBalance: updated.demoBalance,
             hasDepositedBefore: Boolean(updated.hasDepositedBefore),
+            hasFirstDeposit: updated.hasFirstDeposit ?? Boolean(updated.hasDepositedBefore),
+            totalDeposited:
+              typeof updated.totalDeposited === 'number' && Number.isFinite(updated.totalDeposited)
+                ? updated.totalDeposited
+                : prev.totalDeposited ?? 0,
+            firstDepositRevokedByAdmin:
+              typeof updated.firstDepositRevokedByAdmin === 'boolean'
+                ? updated.firstDepositRevokedByAdmin
+                : prev.firstDepositRevokedByAdmin ?? false,
             hasTradedAfterDeposit: Boolean(updated.hasTradedAfterDeposit),
             withdrawLockClearedByAdmin: Boolean(updated.withdrawLockClearedByAdmin),
           };
@@ -562,6 +605,16 @@ export default function App() {
           isWithdrawBlocked: Boolean(data.isWithdrawBlocked ?? syncedMember.isWithdrawBlocked),
           invitedBy: (data.invitedBy as string | null | undefined) ?? syncedMember.invitedBy ?? null,
           hasDepositedBefore: Boolean(data.hasDepositedBefore ?? syncedMember.hasDepositedBefore),
+          hasFirstDeposit:
+            typeof data.hasFirstDeposit === 'boolean'
+              ? data.hasFirstDeposit
+              : typeof syncedMember.hasFirstDeposit === 'boolean'
+              ? syncedMember.hasFirstDeposit
+              : Boolean(data.hasDepositedBefore ?? syncedMember.hasDepositedBefore),
+          totalDeposited: Number(data.totalDeposited ?? syncedMember.totalDeposited ?? 0) || 0,
+          firstDepositRevokedByAdmin: Boolean(
+            data.firstDepositRevokedByAdmin ?? syncedMember.firstDepositRevokedByAdmin
+          ),
           hasTradedAfterDeposit: Boolean(data.hasTradedAfterDeposit ?? syncedMember.hasTradedAfterDeposit),
           withdrawLockClearedByAdmin: Boolean(
             data.withdrawLockClearedByAdmin ?? syncedMember.withdrawLockClearedByAdmin
@@ -673,6 +726,20 @@ export default function App() {
             demoBalance: Number.isFinite(parsedDemo) ? parsedDemo : prev.demoBalance,
             hasDepositedBefore:
               typeof d.hasDepositedBefore === 'boolean' ? d.hasDepositedBefore : prev.hasDepositedBefore,
+            hasFirstDeposit:
+              typeof d.hasFirstDeposit === 'boolean'
+                ? d.hasFirstDeposit
+                : typeof d.hasDepositedBefore === 'boolean'
+                ? d.hasDepositedBefore
+                : prev.hasFirstDeposit,
+            totalDeposited:
+              typeof d.totalDeposited === 'number' && Number.isFinite(d.totalDeposited)
+                ? d.totalDeposited
+                : prev.totalDeposited,
+            firstDepositRevokedByAdmin:
+              typeof d.firstDepositRevokedByAdmin === 'boolean'
+                ? d.firstDepositRevokedByAdmin
+                : prev.firstDepositRevokedByAdmin,
             hasTradedAfterDeposit:
               typeof d.hasTradedAfterDeposit === 'boolean'
                 ? d.hasTradedAfterDeposit
@@ -786,117 +853,221 @@ export default function App() {
     return () => clearInterval(id);
   }, [user.isLoggedIn, user.isLocalDemoSession, user.uid, activeSection, syncWalletFromServer]);
 
-  // Live Market Ticker (Binance REST Snapshot + WebSocket + Smooth Fallback Simulation)
+  // Live Market Feed: Binance Combined Multi-Stream WebSocket (@miniTicker) + Auto-Reconnect + REST Fallback (Binance -> Coinbase) + Deterministic UTC Micro-Ticks
   useEffect(() => {
+    let disposed = false;
     let ws: WebSocket | null = null;
-    let wsActive = false;
-    const controller = new AbortController();
+    let reconnectTimer: number | null = null;
+    let reconnectAttempts = 0;
+    let lastWsTickMs = 0;
+    let activeAbort: AbortController | null = null;
 
-    const applyBinanceTicker = (rawSymbol: string, last: number, pct: number, hi: number, lo: number) => {
-      const sym: MarketSymbol = rawSymbol.toUpperCase() === 'PAXGUSDT' ? 'GOLD' : (rawSymbol.toUpperCase() as MarketSymbol);
-      if (!Number.isFinite(last)) return;
-      setQuotes((prev) =>
-        prev.map((q) =>
-          q.symbol === sym
-            ? {
-                ...q,
-                price: last,
-                changePct: Number.isFinite(pct) ? pct : q.changePct,
-                high24h: Number.isFinite(hi) && hi > 0 ? hi : q.high24h,
-                low24h: Number.isFinite(lo) && lo > 0 ? lo : q.low24h,
-              }
-            : q
-        )
-      );
-    };
-
-    const binanceRestSymbols = encodeURIComponent(
-      JSON.stringify([
-        'BTCUSDT',
-        'ETHUSDT',
-        'SOLUSDT',
-        'BNBUSDT',
-        'XRPUSDT',
-        'DOGEUSDT',
-        'ADAUSDT',
-        'AVAXUSDT',
-        'LINKUSDT',
-        'TONUSDT',
-        'PAXGUSDT',
-      ])
-    );
-    fetch(`https://api.binance.com/api/v3/ticker/24hr?symbols=${binanceRestSymbols}`, {
-      signal: controller.signal,
-    })
-      .then((r) => (r.ok ? r.json() : []))
-      .then((rows: Array<{ symbol: string; lastPrice: string; priceChangePercent: string; highPrice: string; lowPrice: string }>) => {
-        if (!Array.isArray(rows)) return;
-        for (const item of rows) {
-          applyBinanceTicker(
-            item.symbol,
-            parseFloat(item.lastPrice),
-            parseFloat(item.priceChangePercent),
-            parseFloat(item.highPrice),
-            parseFloat(item.lowPrice)
-          );
-        }
-      })
-      .catch(() => {
-        // Fallback smoothly when offline
+    const restAnchors = new Map<MarketSymbol, SharedMarketAnchor>();
+    for (const seed of INITIAL_QUOTES) {
+      restAnchors.set(seed.symbol, {
+        price: seed.price,
+        changePct: seed.changePct,
+        high24h: seed.high24h,
+        low24h: seed.low24h,
       });
-
-    try {
-      ws = new WebSocket(
-        'wss://stream.binance.com:9443/ws/btcusdt@ticker/ethusdt@ticker/solusdt@ticker/bnbusdt@ticker/xrpusdt@ticker/dogeusdt@ticker/adausdt@ticker/avaxusdt@ticker/linkusdt@ticker/tonusdt@ticker/paxgusdt@ticker'
-      );
-      ws.onmessage = (event) => {
-        try {
-          const item = JSON.parse(event.data);
-          if (!item?.s) return;
-          wsActive = true;
-          applyBinanceTicker(
-            item.s,
-            parseFloat(item.c),
-            parseFloat(item.P),
-            parseFloat(item.h),
-            parseFloat(item.l)
-          );
-        } catch {
-          // ignore malformed tick
-        }
-      };
-    } catch {
-      wsActive = false;
     }
 
-    const fallbackInterval = setInterval(() => {
-      const utcSecMs = Math.floor(Date.now() / 1000) * 1000;
+    const recordAnchors = (ticks: ReturnType<typeof parseBinanceRestTicker24hr>) => {
+      for (const tick of ticks) {
+        const prevAnchor = restAnchors.get(tick.symbol);
+        restAnchors.set(tick.symbol, {
+          price: tick.price,
+          changePct: tick.changePct ?? prevAnchor?.changePct ?? 0,
+          high24h: tick.high24h ?? Math.max(prevAnchor?.high24h ?? tick.price, tick.price),
+          low24h:
+            tick.low24h ??
+            (prevAnchor && prevAnchor.low24h > 0
+              ? Math.min(prevAnchor.low24h, tick.price)
+              : tick.price),
+        });
+      }
+      return ticks;
+    };
+
+    const fetchRestSnapshot = async () => {
+      if (disposed) return;
+      if (activeAbort) activeAbort.abort();
+      const controller = new AbortController();
+      activeAbort = controller;
+      const timeoutId = window.setTimeout(() => controller.abort(), 4500);
+
+      try {
+        const res = await fetch(BINANCE_REST_TICKER_URL, { signal: controller.signal });
+        if (res.ok) {
+          const rows = await res.json();
+          const ticks = parseBinanceRestTicker24hr(rows);
+          if (ticks.length > 0 && !disposed) {
+            recordAnchors(ticks);
+            setQuotes((prev) => applyLiveMarketTicks(prev, ticks));
+            return;
+          }
+        }
+      } catch {
+        // Fall through to Coinbase public exchange rates
+      }
+
+      if (disposed || controller.signal.aborted) {
+        window.clearTimeout(timeoutId);
+        return;
+      }
+
+      try {
+        const cbRes = await fetch(COINBASE_EXCHANGE_RATES_URL, { signal: controller.signal });
+        if (cbRes.ok) {
+          const payload = await cbRes.json();
+          const ticks = parseCoinbaseExchangeRates(payload, INITIAL_QUOTES);
+          if (ticks.length > 0 && !disposed) {
+            recordAnchors(ticks);
+            setQuotes((prev) => applyLiveMarketTicks(prev, ticks));
+          }
+        }
+      } catch {
+        // Offline / blocked network falls back seamlessly to UTC deterministic micro-ticks
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== null) return;
+      const delayMs = Math.min(5000, 500 * Math.pow(2, reconnectAttempts));
+      reconnectAttempts += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connectWs();
+      }, delayMs);
+    };
+
+    const connectWs = () => {
+      if (disposed || typeof WebSocket === 'undefined') return;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          try {
+            ws.close();
+          } catch {
+            // ignore close error
+          }
+        }
+        ws = null;
+      }
+
+      try {
+        const nextWs = new WebSocket(BINANCE_COMBINED_STREAM_URL);
+        ws = nextWs;
+
+        nextWs.onopen = () => {
+          reconnectAttempts = 0;
+        };
+
+        nextWs.onmessage = (event) => {
+          if (disposed) return;
+          try {
+            const payload = JSON.parse(String(event.data));
+            const tick = parseBinanceMiniTickerPayload(payload);
+            if (!tick) return;
+            lastWsTickMs = Date.now();
+            recordAnchors([tick]);
+            setQuotes((prev) => applyLiveMarketTicks(prev, [tick]));
+          } catch {
+            // ignore malformed frame
+          }
+        };
+
+        nextWs.onerror = () => {
+          if (!disposed && ws === nextWs) {
+            scheduleReconnect();
+          }
+        };
+
+        nextWs.onclose = () => {
+          if (!disposed && ws === nextWs) {
+            ws = null;
+            scheduleReconnect();
+          }
+        };
+      } catch {
+        ws = null;
+        scheduleReconnect();
+      }
+    };
+
+    const handleResumeOrWake = () => {
+      if (disposed) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void fetchRestSnapshot();
+      const staleOrClosed =
+        !ws ||
+        ws.readyState === WebSocket.CLOSED ||
+        ws.readyState === WebSocket.CLOSING ||
+        Date.now() - lastWsTickMs > 4000;
+      if (staleOrClosed) {
+        reconnectAttempts = 0;
+        connectWs();
+      }
+    };
+
+    void fetchRestSnapshot();
+    connectWs();
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleResumeOrWake);
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('pageshow', handleResumeOrWake);
+      window.addEventListener('online', handleResumeOrWake);
+    }
+
+    const restFallbackInterval = window.setInterval(() => {
+      if (Date.now() - lastWsTickMs > 4500) {
+        void fetchRestSnapshot();
+      }
+    }, 5000);
+
+    const utcMicroTickInterval = window.setInterval(() => {
+      const nowMs = Date.now();
+      const wsHealthy = nowMs - lastWsTickMs <= 4500;
       setQuotes((prev) =>
-        prev.map((q) => {
-          if (q.isCustom) return q;
-          if (wsActive && q.symbol !== 'USOIL') return q;
-          const seedQuote = INITIAL_QUOTES.find((base) => base.symbol === q.symbol);
-          const anchorPrice = seedQuote?.price ?? q.price;
-          const nextPrice = computeOrganicMarketTickPrice(
-            anchorPrice,
-            q.symbol,
-            utcSecMs,
-            q.symbol === 'USOIL' ? 0.004 : 0.0028,
-            'neutral'
-          );
-          return {
-            ...q,
-            price: nextPrice,
-            changePct: anchorPrice > 0 ? Number((((nextPrice - anchorPrice) / anchorPrice) * 100).toFixed(2)) : q.changePct,
-          };
-        })
+        evaluateDeterministicFallbackQuotes(prev, restAnchors, INITIAL_QUOTES, nowMs, wsHealthy)
       );
     }, 1000);
 
     return () => {
-      controller.abort();
-      clearInterval(fallbackInterval);
-      if (ws) ws.close();
+      disposed = true;
+      if (activeAbort) activeAbort.abort();
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      window.clearInterval(restFallbackInterval);
+      window.clearInterval(utcMicroTickInterval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleResumeOrWake);
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('pageshow', handleResumeOrWake);
+        window.removeEventListener('online', handleResumeOrWake);
+      }
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
     };
   }, []);
 
@@ -922,32 +1093,11 @@ export default function App() {
     };
   }, []);
 
-  // Deterministic Landing Live Feed Stream rotation synced across clients by UTC time slot
+  // Deterministic Landing Live Feed Stream rotation synced across clients by UTC time slot (deduplicated)
   useEffect(() => {
     if (user.isLoggedIn) return;
-    const methods = ['KBZPay', 'WavePay', 'USDT TRC20', 'Bank Transfer'];
     const id = setInterval(() => {
-      const slot = Math.floor(Date.now() / 4500);
-      const isWithdraw = slot % 3 === 0;
-      const method = methods[slot % methods.length];
-      const amount = 120 + ((slot * 173) % 880);
-      const hexA = ((slot * 4919) & 0xffff).toString(16).padStart(4, '0');
-      const hexB = ((slot * 7919) & 0xfff).toString(16).padStart(3, '0');
-      const masked =
-        method === 'USDT TRC20'
-          ? `0x${hexA}...${hexB}`
-          : `09${(slot % 8) + 1}***${100 + ((slot * 97) % 899)}`;
-      setLiveFeedItems((prev) => [
-        {
-          id: `${slot}`,
-          type: isWithdraw ? 'WITHDRAWAL' : 'DEPOSIT',
-          method,
-          amount,
-          user: masked,
-          time: 'Just now',
-        },
-        ...prev.slice(0, 3),
-      ]);
+      setLiveFeedItems((prev) => appendDeterministicLiveFeedItem(prev, Date.now()));
     }, 4500);
     return () => clearInterval(id);
   }, [user.isLoggedIn]);
@@ -2136,6 +2286,9 @@ export default function App() {
           isWithdrawBlocked: false,
           invitedBy: null,
           hasDepositedBefore: true,
+          hasFirstDeposit: true,
+          totalDeposited: Number(adminUser.totalDeposited ?? 25000),
+          firstDepositRevokedByAdmin: false,
           hasTradedAfterDeposit: true,
           withdrawLockClearedByAdmin: true,
           demoBalance: Number(adminUser.demoBalance ?? 100000),
@@ -2180,6 +2333,9 @@ export default function App() {
           isWithdrawBlocked: false,
           invitedBy: payload.referralCode || null,
           hasDepositedBefore: false,
+          hasFirstDeposit: false,
+          totalDeposited: 0,
+          firstDepositRevokedByAdmin: false,
           hasTradedAfterDeposit: false,
           withdrawLockClearedByAdmin: false,
           twoFactorEnabled: false,
@@ -2199,6 +2355,11 @@ export default function App() {
           createdAtMs: Date.now(),
           createdAt: serverTimestamp(),
         });
+        const nextStats = await incrementPlatformStatsForActivityStatic(
+          { type: 'registration' },
+          cred.user.uid
+        );
+        if (nextStats) setPlatformStats(nextStats);
         showToast('Account registered! Verification link sent to your email, and $2.00 Real bonus credited.');
       } else {
         await signInWithEmailAndPassword(auth, payload.email, payload.password);
@@ -2532,6 +2693,9 @@ export default function App() {
         ...prev,
         realBalance: prev.realBalance + usdAmount,
         hasDepositedBefore: true,
+        hasFirstDeposit: true,
+        totalDeposited: Number((Number(prev.totalDeposited ?? 0) + usdAmount).toFixed(2)),
+        firstDepositRevokedByAdmin: false,
         hasTradedAfterDeposit: false,
         withdrawLockClearedByAdmin: false,
       }));
@@ -2585,7 +2749,15 @@ export default function App() {
     pin: string,
     totpCode?: string
   ): Promise<boolean> => {
-    const eligibility = evaluateWithdrawalEligibility(user);
+    if (!effectiveHasFirstDeposit) {
+      showToast(FIRST_DEPOSIT_REQUIRED_MESSAGE, 'error');
+      return false;
+    }
+    const eligibility = evaluateWithdrawalEligibility({
+      ...user,
+      hasFirstDeposit: effectiveHasFirstDeposit,
+      hasDepositedBefore: effectiveHasFirstDeposit,
+    });
     if (!eligibility.allowed) {
       showToast(eligibility.reason || 'Withdrawals are locked for your account.', 'error');
       return false;
@@ -2699,6 +2871,10 @@ export default function App() {
     totpCode?: string
   ): Promise<{ ok: boolean; error?: string }> => {
     const transferMode: AccountMode = 'real';
+    if (!effectiveHasFirstDeposit) {
+      showToast(FIRST_DEPOSIT_REQUIRED_MESSAGE, 'error');
+      return { ok: false, error: FIRST_DEPOSIT_REQUIRED_MESSAGE };
+    }
     if (pin !== user.pin) {
       showToast('Incorrect 4-digit Security PIN.', 'error');
       return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
@@ -2737,6 +2913,7 @@ export default function App() {
       isLocalDemoSession: user.isLocalDemoSession,
       localSenderBalance: avail,
       expectedLocalPin: user.pin,
+      senderHasFirstDeposit: effectiveHasFirstDeposit,
       totpCode,
       expectedLocalTwoFactorEnabled: Boolean(user.twoFactorEnabled),
       expectedLocalTwoFactorSecret: user.twoFactorSecret ?? null,
@@ -3162,6 +3339,42 @@ export default function App() {
     showToast(`Admin cleared withdrawal lock for ${target?.username ?? uid}.`);
   };
 
+  const handleToggleFirstDeposit = async (uid: string, hasDeposited: boolean) => {
+    if (!canClearWithdrawLock(user.role)) {
+      showToast('Only Admin can update First Deposit status.', 'error');
+      return;
+    }
+    const target = managedMembers.find((m) => m.uid === uid) ?? (uid === user.uid ? user : undefined);
+    setManagedMembers((prev) =>
+      prev.map((m) =>
+        m.uid === uid
+          ? {
+              ...m,
+              hasFirstDeposit: hasDeposited,
+              hasDepositedBefore: hasDeposited,
+              firstDepositRevokedByAdmin: !hasDeposited,
+            }
+          : m
+      )
+    );
+    if (uid === user.uid) {
+      setUser((prev) => ({
+        ...prev,
+        hasFirstDeposit: hasDeposited,
+        hasDepositedBefore: hasDeposited,
+        firstDepositRevokedByAdmin: !hasDeposited,
+      }));
+    }
+    await patchMemberServer(uid, {
+      hasFirstDeposit: hasDeposited,
+      hasDepositedBefore: hasDeposited,
+      firstDepositRevokedByAdmin: !hasDeposited,
+    });
+    showToast(
+      `${target?.username ?? uid} marked as ${hasDeposited ? 'Deposited' : 'No Deposit'}.`
+    );
+  };
+
   const handleAdjustMemberBalance = async (
     uid: string,
     wallet: 'real' | 'demo',
@@ -3324,6 +3537,12 @@ export default function App() {
           ...prev,
           realBalance: updatedMember.realBalance,
           hasDepositedBefore: true,
+          hasFirstDeposit: true,
+          firstDepositRevokedByAdmin: false,
+          totalDeposited:
+            typeof updatedMember.totalDeposited === 'number'
+              ? updatedMember.totalDeposited
+              : Number((Number(prev.totalDeposited ?? 0) + req.amount).toFixed(2)),
         }));
       }
     }
@@ -3337,7 +3556,14 @@ export default function App() {
         setManagedMembers((prev) =>
           prev.map((m) =>
             m.uid === req.userId
-              ? { ...m, realBalance: m.realBalance + req.amount, hasDepositedBefore: true }
+              ? {
+                  ...m,
+                  realBalance: m.realBalance + req.amount,
+                  hasDepositedBefore: true,
+                  hasFirstDeposit: true,
+                  firstDepositRevokedByAdmin: false,
+                  totalDeposited: Number((Number(m.totalDeposited ?? 0) + req.amount).toFixed(2)),
+                }
               : m
           )
         );
@@ -3346,12 +3572,20 @@ export default function App() {
             ...prev,
             realBalance: prev.realBalance + req.amount,
             hasDepositedBefore: true,
+            hasFirstDeposit: true,
+            firstDepositRevokedByAdmin: false,
+            totalDeposited: Number((Number(prev.totalDeposited ?? 0) + req.amount).toFixed(2)),
           }));
         }
       }
     }
 
     setPendingDeposits((prev) => prev.filter((item) => item.id !== req.id));
+    const nextStatsAfterDep = await incrementPlatformStatsForActivityStatic({
+      type: 'deposit',
+      amount: req.amount,
+    });
+    if (nextStatsAfterDep) setPlatformStats(nextStatsAfterDep);
     showToast(`Deposit of $${req.amount.toFixed(2)} approved & credited!`);
     await loadStaffRequests();
   };
@@ -3389,6 +3623,11 @@ export default function App() {
       );
     }
     setPendingWithdrawals((prev) => prev.filter((item) => item.id !== req.id));
+    const nextStatsAfterWd = await incrementPlatformStatsForActivityStatic({
+      type: 'withdrawal',
+      amount: req.amount,
+    });
+    if (nextStatsAfterWd) setPlatformStats(nextStatsAfterWd);
     showToast(`Withdrawal approved for payout ($${req.amount.toFixed(2)}).`);
     await loadStaffRequests();
   };
@@ -3467,6 +3706,9 @@ export default function App() {
               isBlocked: user.isBlocked,
               isWithdrawBlocked: user.isWithdrawBlocked,
               hasDepositedBefore: user.hasDepositedBefore,
+              hasFirstDeposit: effectiveHasFirstDeposit,
+              totalDeposited: user.totalDeposited ?? 0,
+              firstDepositRevokedByAdmin: user.firstDepositRevokedByAdmin ?? false,
               hasTradedAfterDeposit: user.hasTradedAfterDeposit,
               withdrawLockClearedByAdmin: user.withdrawLockClearedByAdmin,
               realBalance: user.realBalance,
@@ -3671,7 +3913,11 @@ export default function App() {
 
           {activeSection === 'profile' && (
             <WalletWorkspace
-              user={user}
+              user={{
+                ...user,
+                hasFirstDeposit: effectiveHasFirstDeposit,
+                hasDepositedBefore: effectiveHasFirstDeposit,
+              }}
               accountMode={accountMode}
               onSetAccountMode={setAccountMode}
               quotes={quotes}
@@ -3741,7 +3987,10 @@ export default function App() {
                   role: user.role,
                   isBlocked: user.isBlocked,
                   isWithdrawBlocked: user.isWithdrawBlocked,
-                  hasDepositedBefore: user.hasDepositedBefore,
+                  hasDepositedBefore: effectiveHasFirstDeposit,
+                  hasFirstDeposit: effectiveHasFirstDeposit,
+                  totalDeposited: user.totalDeposited ?? 0,
+                  firstDepositRevokedByAdmin: user.firstDepositRevokedByAdmin ?? false,
                   hasTradedAfterDeposit: user.hasTradedAfterDeposit,
                   withdrawLockClearedByAdmin: user.withdrawLockClearedByAdmin,
                   realBalance: user.realBalance,
@@ -3850,7 +4099,11 @@ export default function App() {
 
       {withdrawModalOpen && (
         <WithdrawModal
-          user={user}
+          user={{
+            ...user,
+            hasFirstDeposit: effectiveHasFirstDeposit,
+            hasDepositedBefore: effectiveHasFirstDeposit,
+          }}
           withdrawRateMMK={withdrawRateMMK}
           onSubmitWithdraw={handleSubmitWithdraw}
           onOpenDeposit={() => setDepositModalOpen(true)}
@@ -3865,6 +4118,8 @@ export default function App() {
           currentUserUid={user.uid}
           currentUserEmail={user.email}
           userPin={user.pin}
+          hasFirstDeposit={effectiveHasFirstDeposit}
+          onOpenDeposit={() => setDepositModalOpen(true)}
           twoFactorEnabled={Boolean(user.twoFactorEnabled)}
           onVerifyTwoFactor={(code) => verifyTotpCode(user.twoFactorSecret, code)}
           onLookupRecipient={handleLookupTransferRecipient}
@@ -3935,7 +4190,10 @@ export default function App() {
               role: user.role,
               isBlocked: user.isBlocked,
               isWithdrawBlocked: user.isWithdrawBlocked,
-              hasDepositedBefore: user.hasDepositedBefore,
+              hasDepositedBefore: effectiveHasFirstDeposit,
+              hasFirstDeposit: effectiveHasFirstDeposit,
+              totalDeposited: user.totalDeposited ?? 0,
+              firstDepositRevokedByAdmin: user.firstDepositRevokedByAdmin ?? false,
               hasTradedAfterDeposit: user.hasTradedAfterDeposit,
               withdrawLockClearedByAdmin: user.withdrawLockClearedByAdmin,
               realBalance: user.realBalance,
@@ -3967,6 +4225,7 @@ export default function App() {
           onSearchMembers={handleSearchMembers}
           onToggleBlockMember={handleToggleBlockMember}
           onToggleWithdrawBlock={handleToggleWithdrawBlock}
+          onToggleFirstDeposit={handleToggleFirstDeposit}
           onClearWithdrawLock={handleClearWithdrawLock}
           onAdjustMemberBalance={handleAdjustMemberBalance}
           onAssignMemberRole={handleAssignMemberRole}
@@ -3979,6 +4238,15 @@ export default function App() {
             setDepositAccounts(payload.depositAccounts);
             await savePlatformSettingsStatic(payload);
             showToast('Platform settings saved.');
+          }}
+          onSavePlatformStatsOnly={async (nextStats) => {
+            const savedStats = await savePlatformStatsOnlyStatic(nextStats);
+            setPlatformStats(savedStats);
+            showToast(
+              savedStats.syncedToCloud
+                ? 'Platform statistics saved & synced live to Firestore.'
+                : 'Platform statistics saved locally (sign in with Firebase Admin to sync cloud).'
+            );
           }}
           adminCoins={adminCoins}
           selectedCoinAnalytics={selectedCoinAnalytics}

@@ -109,6 +109,9 @@ export interface UserProfile {
   isWithdrawBlocked: boolean;
   invitedBy: string | null;
   hasDepositedBefore: boolean;
+  hasFirstDeposit?: boolean;
+  totalDeposited?: number;
+  firstDepositRevokedByAdmin?: boolean;
   hasTradedAfterDeposit: boolean;
   withdrawLockClearedByAdmin: boolean;
   demoBalance: number;
@@ -145,9 +148,19 @@ export interface FaqEntry {
 }
 
 export interface PlatformStats {
+  registeredMembers?: number;
   membersCount: number;
-  totalDeposits: string;
-  totalWithdrawals: string;
+  totalDeposits: number | string;
+  totalWithdrawals: number | string;
+  autoIncrementStats?: boolean;
+}
+
+export interface CanonicalPlatformStats {
+  registeredMembers: number;
+  membersCount: number;
+  totalDeposits: number;
+  totalWithdrawals: number;
+  autoIncrementStats: boolean;
 }
 
 export interface LiveFeedItem {
@@ -413,6 +426,9 @@ export interface ManagedMember {
   isBlocked: boolean;
   isWithdrawBlocked: boolean;
   hasDepositedBefore?: boolean;
+  hasFirstDeposit?: boolean;
+  totalDeposited?: number;
+  firstDepositRevokedByAdmin?: boolean;
   hasTradedAfterDeposit?: boolean;
   withdrawLockClearedByAdmin?: boolean;
   realBalance: number;

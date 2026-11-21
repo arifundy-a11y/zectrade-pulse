@@ -6,7 +6,10 @@ import {
   getDocFromServer,
   getDocs,
   getDocsFromServer,
+  increment,
+  onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -20,6 +23,7 @@ import {
 } from '../data/defaults';
 import type {
   AccountMode,
+  CanonicalPlatformStats,
   DepositAccounts,
   FaqEntry,
   ManagedMember,
@@ -30,11 +34,19 @@ import type {
   WithdrawMethod,
 } from '../types';
 import { deduplicateFirestoreAgainstSql } from '../utils/depositHistory';
+import {
+  computeStatsWithActivity,
+  DEFAULT_PLATFORM_STATS,
+  normalizePlatformStats,
+  type PlatformActivityEvent,
+} from '../utils/platformStats';
 import { FIRST_REGISTER_REAL_BONUS_USD } from '../utils/tradingEngine';
 import { roundUsd2 } from '../utils/transferEngine';
 import { db, isFirebaseConfigured } from './firebaseClient';
 import { randomHexId, readStorageJson, writeStorageJson } from './storageHelper';
 import { executeDirectP2PTransfer, lookupTransferRecipientDirect } from './transferEngine';
+
+const countedRegistrationUids = new Set<string>();
 
 const MEMBERS_STORAGE_KEY = 'zectrade_members_v1';
 const REQUESTS_STORAGE_KEY = 'zectrade_wallet_requests_v1';
@@ -72,6 +84,7 @@ export interface PublicPlatformSettings {
   withdrawRateMMK: number;
   depositAccounts: DepositAccounts;
   brandLogoUrl: string | null;
+  statsManualUpdatedAtMs?: number;
 }
 
 function readStoredMembers(): ManagedMember[] {
@@ -116,6 +129,17 @@ export function getMemberActivitySync(uid: string): WalletTransaction[] {
 function normalizeMemberDoc(id: string, d: Record<string, unknown>): ManagedMember {
   const parsedReal = Number(d.realBalance);
   const parsedDemo = Number(d.demoBalance);
+  const parsedTotalDeposited = Number(d.totalDeposited);
+  const totalDeposited =
+    Number.isFinite(parsedTotalDeposited) && parsedTotalDeposited >= 0
+      ? parsedTotalDeposited
+      : 0;
+  const firstDepositRevokedByAdmin = Boolean(d.firstDepositRevokedByAdmin);
+  const rawHasDepositedBefore = Boolean(d.hasDepositedBefore);
+  const hasFirstDeposit =
+    typeof d.hasFirstDeposit === 'boolean'
+      ? d.hasFirstDeposit || (!firstDepositRevokedByAdmin && (rawHasDepositedBefore || totalDeposited > 0))
+      : !firstDepositRevokedByAdmin && (rawHasDepositedBefore || totalDeposited > 0);
   return {
     uid: String(id || d.uid || ''),
     username: String(d.username || 'Trader'),
@@ -123,7 +147,10 @@ function normalizeMemberDoc(id: string, d: Record<string, unknown>): ManagedMemb
     role: (d.role as UserRole) || 'user',
     isBlocked: Boolean(d.isBlocked),
     isWithdrawBlocked: Boolean(d.isWithdrawBlocked),
-    hasDepositedBefore: Boolean(d.hasDepositedBefore),
+    hasDepositedBefore: firstDepositRevokedByAdmin ? Boolean(d.hasFirstDeposit) : hasFirstDeposit,
+    hasFirstDeposit,
+    totalDeposited,
+    firstDepositRevokedByAdmin,
     hasTradedAfterDeposit: Boolean(d.hasTradedAfterDeposit),
     withdrawLockClearedByAdmin: Boolean(d.withdrawLockClearedByAdmin),
     realBalance: Number.isFinite(parsedReal) ? parsedReal : 0,
@@ -327,6 +354,9 @@ export async function syncMemberOnAuthStatic(params: {
       isBlocked: false,
       isWithdrawBlocked: false,
       hasDepositedBefore: false,
+      hasFirstDeposit: false,
+      totalDeposited: 0,
+      firstDepositRevokedByAdmin: false,
       hasTradedAfterDeposit: false,
       withdrawLockClearedByAdmin: false,
       realBalance: FIRST_REGISTER_REAL_BONUS_USD,
@@ -337,6 +367,7 @@ export async function syncMemberOnAuthStatic(params: {
     };
     upsertMemberInLocalCache(member);
     await mirrorMemberToFirestore(member);
+    void incrementPlatformStatsForActivityStatic({ type: 'registration' }, params.uid);
   } else {
     const updated: ManagedMember = {
       ...member,
@@ -789,12 +820,16 @@ export async function approveDepositRequestStatic(req: StaffWalletRequest): Prom
   let updatedMember: ManagedMember | null = null;
 
   if (target) {
-    const isFirstDeposit = !target.hasDepositedBefore;
+    const isFirstDeposit = !(target.hasFirstDeposit || target.hasDepositedBefore);
     const nextReal = roundUsd2(target.realBalance + req.amount);
+    const nextTotalDeposited = roundUsd2(Number(target.totalDeposited || 0) + req.amount);
     updatedMember = {
       ...target,
       realBalance: nextReal,
       hasDepositedBefore: true,
+      hasFirstDeposit: true,
+      totalDeposited: nextTotalDeposited,
+      firstDepositRevokedByAdmin: false,
     };
     let nextMembers = members.map((m) => (m.uid === target.uid ? updatedMember! : m));
 
@@ -825,8 +860,61 @@ export async function approveDepositRequestStatic(req: StaffWalletRequest): Prom
   }
 
   if (isFirebaseConfigured && db) {
+    const firestoreDb = db;
+    const targetUid = updatedMember?.uid || req.userId;
+
+    if (targetUid) {
+      const userRef = doc(firestoreDb, 'users', targetUid);
+      try {
+        const atomicResult = await runTransaction(firestoreDb, async (tx) => {
+          const userSnap = await tx.get(userRef);
+          if (userSnap.exists()) {
+            const raw = userSnap.data() as Record<string, unknown>;
+            const currReal = Number(raw.realBalance ?? 0);
+            const currDeposited = Number(raw.totalDeposited ?? 0);
+            const nextReal = roundUsd2((Number.isFinite(currReal) ? currReal : 0) + req.amount);
+            const nextTotalDeposited = roundUsd2(
+              (Number.isFinite(currDeposited) ? currDeposited : 0) + req.amount
+            );
+            tx.update(userRef, {
+              realBalance: nextReal,
+              hasFirstDeposit: true,
+              hasDepositedBefore: true,
+              firstDepositRevokedByAdmin: false,
+              totalDeposited: nextTotalDeposited,
+            });
+            return normalizeMemberDoc(userSnap.id, {
+              ...raw,
+              realBalance: nextReal,
+              hasFirstDeposit: true,
+              hasDepositedBefore: true,
+              firstDepositRevokedByAdmin: false,
+              totalDeposited: nextTotalDeposited,
+            });
+          }
+          return null;
+        });
+        if (atomicResult) {
+          updatedMember = atomicResult;
+          upsertMemberInLocalCache(atomicResult);
+        }
+      } catch {
+        try {
+          await updateDoc(userRef, {
+            ...(updatedMember ? { realBalance: updatedMember.realBalance } : {}),
+            hasFirstDeposit: true,
+            hasDepositedBefore: true,
+            firstDepositRevokedByAdmin: false,
+            totalDeposited: increment(req.amount),
+          });
+        } catch {
+          // Ignore rule limits
+        }
+      }
+    }
+
     try {
-      await updateDoc(doc(db, 'walletRequests', req.id), {
+      await updateDoc(doc(firestoreDb, 'walletRequests', req.id), {
         status: 'SUCCESS',
         processedAtMs: nowMs,
       });
@@ -836,17 +924,7 @@ export async function approveDepositRequestStatic(req: StaffWalletRequest): Prom
     if (req.firestorePath) {
       try {
         const segments = req.firestorePath.split('/');
-        await updateDoc(doc(db, segments[0], ...segments.slice(1)), { status: 'SUCCESS' });
-      } catch {
-        // Ignore rule limits
-      }
-    }
-    if (updatedMember) {
-      try {
-        await updateDoc(doc(db, 'users', updatedMember.uid), {
-          realBalance: updatedMember.realBalance,
-          hasDepositedBefore: true,
-        });
+        await updateDoc(doc(firestoreDb, segments[0], ...segments.slice(1)), { status: 'SUCCESS' });
       } catch {
         // Ignore rule limits
       }
@@ -1032,11 +1110,7 @@ export function getInitialPlatformSettingsSync(): PublicPlatformSettings {
 
   return {
     csrTelegramLink: saved?.csrTelegramLink || 'https://t.me/zectrade_csr',
-    platformStats: saved?.platformStats || {
-      membersCount: 23909,
-      totalDeposits: '$42,850,910',
-      totalWithdrawals: '$15,240,600',
-    },
+    platformStats: normalizePlatformStats(saved?.platformStats ?? DEFAULT_PLATFORM_STATS),
     platformDescription: saved?.platformDescription || DEFAULT_DESCRIPTION,
     faqEntries:
       Array.isArray(saved?.faqEntries) && saved.faqEntries.length > 0
@@ -1046,6 +1120,9 @@ export function getInitialPlatformSettingsSync(): PublicPlatformSettings {
     withdrawRateMMK: saved?.withdrawRateMMK || 4300,
     depositAccounts: saved?.depositAccounts || DEFAULT_DEPOSIT_ACCOUNTS,
     brandLogoUrl: saved?.brandLogoUrl ?? brandLogoUrl,
+    ...(typeof saved?.statsManualUpdatedAtMs === 'number'
+      ? { statsManualUpdatedAtMs: saved.statsManualUpdatedAtMs }
+      : {}),
   };
 }
 
@@ -1054,14 +1131,16 @@ export async function loadPublicPlatformSettingsStatic(): Promise<PublicPlatform
   if (!isFirebaseConfigured || !db) return current;
 
   try {
-    const [faqSnap, csrSnap, statsSnap, accSnap, rateSnap, brandSnap] = await Promise.all([
-      getDoc(doc(db, 'settings', 'faqConfig')),
-      getDoc(doc(db, 'settings', 'csrConfig')),
-      getDoc(doc(db, 'settings', 'landingStats')),
-      getDoc(doc(db, 'settings', 'depositAccounts')),
-      getDoc(doc(db, 'settings', 'exchangeRates')),
-      getDoc(doc(db, 'settings', 'brandConfig')),
-    ]);
+    const [faqSnap, csrSnap, platformStatsSnap, legacyStatsSnap, accSnap, rateSnap, brandSnap] =
+      await Promise.all([
+        getDoc(doc(db, 'settings', 'faqConfig')),
+        getDoc(doc(db, 'settings', 'csrConfig')),
+        getDoc(doc(db, 'settings', 'platformStats')),
+        getDoc(doc(db, 'settings', 'landingStats')),
+        getDoc(doc(db, 'settings', 'depositAccounts')),
+        getDoc(doc(db, 'settings', 'exchangeRates')),
+        getDoc(doc(db, 'settings', 'brandConfig')),
+      ]);
 
     const next: PublicPlatformSettings = { ...current };
     if (faqSnap.exists()) {
@@ -1072,19 +1151,16 @@ export async function loadPublicPlatformSettingsStatic(): Promise<PublicPlatform
     if (csrSnap.exists() && csrSnap.data().telegramLink) {
       next.csrTelegramLink = csrSnap.data().telegramLink;
     }
-    if (statsSnap.exists()) {
-      const d = statsSnap.data();
-      next.platformStats = {
-        membersCount: d.membersCount ?? next.platformStats.membersCount,
-        totalDeposits: d.totalDeposits ?? next.platformStats.totalDeposits,
-        totalWithdrawals: d.totalWithdrawals ?? next.platformStats.totalWithdrawals,
-      };
+    if (platformStatsSnap.exists()) {
+      next.platformStats = normalizePlatformStats(platformStatsSnap.data());
+    } else if (legacyStatsSnap.exists() && !current.statsManualUpdatedAtMs) {
+      next.platformStats = normalizePlatformStats(legacyStatsSnap.data());
     }
     if (accSnap.exists()) next.depositAccounts = accSnap.data() as DepositAccounts;
     if (rateSnap.exists()) {
       const d = rateSnap.data();
       if (d.depositMMK) next.depositRateMMK = Number(d.depositMMK);
-      if (d.withdrawMMK) next.withdrawRateMMK = Number(d.withdrawMMK);
+      if (d.withdrawMMK) next.withdrawRateMMK = Number(d.withdrawRateMMK);
     }
     if (brandSnap.exists()) {
       const d = brandSnap.data();
@@ -1097,6 +1173,127 @@ export async function loadPublicPlatformSettingsStatic(): Promise<PublicPlatform
   } catch {
     return current;
   }
+}
+
+export function subscribePlatformStatsStatic(
+  onUpdate: (stats: CanonicalPlatformStats) => void
+): () => void {
+  if (!isFirebaseConfigured || !db) {
+    return () => {};
+  }
+  const firestoreDb = db;
+  return onSnapshot(
+    doc(firestoreDb, 'settings', 'platformStats'),
+    (snap) => {
+      if (!snap.exists()) return;
+      const normalized = normalizePlatformStats(snap.data());
+      const current = getInitialPlatformSettingsSync();
+      writeStorageJson(PLATFORM_SETTINGS_KEY, {
+        ...current,
+        platformStats: normalized,
+      });
+      onUpdate(normalized);
+    },
+    () => {
+      // Ignore permission/offline errors gracefully
+    }
+  );
+}
+
+export async function savePlatformStatsOnlyStatic(
+  stats: PlatformStats
+): Promise<CanonicalPlatformStats & { syncedToCloud: boolean }> {
+  const normalized = normalizePlatformStats(stats);
+  const current = getInitialPlatformSettingsSync();
+  const updatedAtMs = Date.now();
+  writeStorageJson(PLATFORM_SETTINGS_KEY, {
+    ...current,
+    platformStats: normalized,
+    statsManualUpdatedAtMs: updatedAtMs,
+  });
+
+  let syncedToCloud = false;
+  if (isFirebaseConfigured && db) {
+    const payload = {
+      registeredMembers: normalized.registeredMembers,
+      membersCount: normalized.registeredMembers,
+      totalDeposits: normalized.totalDeposits,
+      totalWithdrawals: normalized.totalWithdrawals,
+      autoIncrementStats: normalized.autoIncrementStats,
+      updatedAtMs,
+    };
+    try {
+      await Promise.all([
+        setDoc(doc(db, 'settings', 'platformStats'), payload, { merge: true }),
+        setDoc(doc(db, 'settings', 'landingStats'), payload, { merge: true }),
+      ]);
+      syncedToCloud = true;
+    } catch {
+      syncedToCloud = false;
+    }
+  }
+
+  return { ...normalized, syncedToCloud };
+}
+
+export async function incrementPlatformStatsForActivityStatic(
+  event: PlatformActivityEvent,
+  dedupeRegistrationUid?: string
+): Promise<CanonicalPlatformStats | null> {
+  if (event.type === 'registration' && dedupeRegistrationUid) {
+    if (countedRegistrationUids.has(dedupeRegistrationUid)) {
+      return null;
+    }
+    countedRegistrationUids.add(dedupeRegistrationUid);
+  }
+
+  const localCurrent = normalizePlatformStats(getInitialPlatformSettingsSync().platformStats);
+
+  if (isFirebaseConfigured && db) {
+    const firestoreDb = db;
+    const statsRef = doc(firestoreDb, 'settings', 'platformStats');
+    try {
+      const updated = await runTransaction(firestoreDb, async (tx) => {
+        const snap = await tx.get(statsRef);
+        const base = snap.exists() ? normalizePlatformStats(snap.data()) : localCurrent;
+        const next = computeStatsWithActivity(base, event);
+        if (!next) return null;
+
+        tx.set(
+          statsRef,
+          {
+            registeredMembers: next.registeredMembers,
+            membersCount: next.registeredMembers,
+            totalDeposits: next.totalDeposits,
+            totalWithdrawals: next.totalWithdrawals,
+            autoIncrementStats: next.autoIncrementStats,
+            updatedAtMs: Date.now(),
+          },
+          { merge: true }
+        );
+        return next;
+      });
+      if (updated) {
+        const currentSettings = getInitialPlatformSettingsSync();
+        writeStorageJson(PLATFORM_SETTINGS_KEY, {
+          ...currentSettings,
+          platformStats: updated,
+        });
+      }
+      return updated;
+    } catch {
+      // Fall back to local stats storage if offline or restricted
+    }
+  }
+
+  const nextLocal = computeStatsWithActivity(localCurrent, event);
+  if (!nextLocal) return null;
+  const currentSettings = getInitialPlatformSettingsSync();
+  writeStorageJson(PLATFORM_SETTINGS_KEY, {
+    ...currentSettings,
+    platformStats: nextLocal,
+  });
+  return nextLocal;
 }
 
 export async function saveBrandLogoStatic(logoUrl: string | null): Promise<void> {
@@ -1133,21 +1330,32 @@ export async function savePlatformSettingsStatic(payload: {
   withdrawRateMMK: number;
   depositAccounts: DepositAccounts;
 }): Promise<void> {
+  const normalizedStats = normalizePlatformStats(payload.platformStats);
   const current = getInitialPlatformSettingsSync();
   writeStorageJson(PLATFORM_SETTINGS_KEY, {
     ...current,
     csrTelegramLink: payload.csrTelegramLink,
-    platformStats: payload.platformStats,
+    platformStats: normalizedStats,
     depositRateMMK: payload.depositRateMMK,
     withdrawRateMMK: payload.withdrawRateMMK,
     depositAccounts: payload.depositAccounts,
+    statsManualUpdatedAtMs: Date.now(),
   });
 
   if (isFirebaseConfigured && db) {
+    const statsPayload = {
+      registeredMembers: normalizedStats.registeredMembers,
+      membersCount: normalizedStats.registeredMembers,
+      totalDeposits: normalizedStats.totalDeposits,
+      totalWithdrawals: normalizedStats.totalWithdrawals,
+      autoIncrementStats: normalizedStats.autoIncrementStats,
+      updatedAtMs: Date.now(),
+    };
     try {
       await Promise.all([
         setDoc(doc(db, 'settings', 'csrConfig'), { telegramLink: payload.csrTelegramLink }),
-        setDoc(doc(db, 'settings', 'landingStats'), payload.platformStats),
+        setDoc(doc(db, 'settings', 'platformStats'), statsPayload, { merge: true }),
+        setDoc(doc(db, 'settings', 'landingStats'), statsPayload, { merge: true }),
         setDoc(doc(db, 'settings', 'exchangeRates'), {
           depositMMK: payload.depositRateMMK,
           withdrawMMK: payload.withdrawRateMMK,

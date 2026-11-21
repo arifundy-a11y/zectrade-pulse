@@ -52,12 +52,14 @@ import {
   executeP2PTransferStatic,
   getInitialPlatformSettingsSync,
   getMemberActivitySync,
+  incrementPlatformStatsForActivityStatic,
   listMembersStatic,
   listStaffRequestsStatic,
   lookupTransferRecipientStatic,
   rejectWithdrawalRequestStatic,
   saveBrandLogoStatic,
   savePlatformSettingsStatic,
+  savePlatformStatsOnlyStatic,
 } from './walletAdminService';
 import { deduplicateFirestoreAgainstSql } from '../utils/depositHistory';
 
@@ -348,6 +350,8 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
     });
     assert.ok(approved.updatedMember);
     assert.equal(approved.updatedMember.hasDepositedBefore, true);
+    assert.equal(approved.updatedMember.hasFirstDeposit, true);
+    assert.equal(approved.updatedMember.totalDeposited, 1620);
     assert.equal(approved.updatedMember.realBalance, 1620);
 
     const wdReq = await createWalletRequestStatic({
@@ -387,14 +391,46 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
     const lookupByUid = await lookupTransferRecipientStatic('USR-7731');
     assert.equal(lookupByUid?.email, 'marcus.c@zectrade.io');
 
-    const transfer = await executeDirectP2PTransfer({
+    // User without first deposit (USR-9012) is blocked from P2P transfer
+    const blockedTransfer = await executeDirectP2PTransfer({
       senderUid: 'USR-9012',
-      senderEmail: 'alex.chen@zectrade.io',
-      senderUsername: 'AlexChen',
+      senderEmail: 'aung.kyaw@zectrade.io',
+      senderUsername: 'Aung Kyaw',
       recipientIdentifier: 'MARCUS.C@ZECTRADE.IO',
       accountMode: 'real',
       amount: 1,
       pin: '1234',
+    });
+    assert.equal(blockedTransfer.ok, false);
+    if (!blockedTransfer.ok) {
+      assert.match(blockedTransfer.error, /First Deposit Required/i);
+    }
+
+    // User with approved deposit (USR-4418) can send P2P to USR-9012 without unlocking USR-9012's first deposit
+    const toUndeposited = await executeDirectP2PTransfer({
+      senderUid: 'USR-4418',
+      senderEmail: 'sumyat@zectrade.io',
+      senderUsername: 'Su Myat',
+      recipientIdentifier: 'USR-9012',
+      accountMode: 'real',
+      amount: 10,
+      pin: '4321',
+    });
+    assert.equal(toUndeposited.ok, true);
+    const recipientMemberAfter = (await listMembersStatic('USR-9012')).find((m) => m.uid === 'USR-9012');
+    assert.equal(recipientMemberAfter?.realBalance, 12);
+    assert.equal(Boolean(recipientMemberAfter?.hasFirstDeposit), false);
+    assert.equal(Boolean(recipientMemberAfter?.hasDepositedBefore), false);
+
+    // USR-4418 can also send P2P to USR-7731
+    const transfer = await executeDirectP2PTransfer({
+      senderUid: 'USR-4418',
+      senderEmail: 'sumyat@zectrade.io',
+      senderUsername: 'Su Myat',
+      recipientIdentifier: 'MARCUS.C@ZECTRADE.IO',
+      accountMode: 'real',
+      amount: 1,
+      pin: '4321',
     });
     assert.equal(typeof executeP2PTransferStatic, 'function');
     assert.equal(transfer.ok, true);
@@ -402,7 +438,7 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
       assert.equal(transfer.recipient.newBalance, 8901);
       assert.equal(transfer.sentTransaction.type, 'P2P TRANSFER SENT (REAL)');
 
-      const senderHistory = getMemberActivitySync('USR-9012');
+      const senderHistory = getMemberActivitySync('USR-4418');
       const recipientHistory = getMemberActivitySync('USR-7731');
       assert.equal(senderHistory.some((tx) => tx.id === transfer.sentTransaction.id), true);
       assert.equal(
@@ -490,5 +526,51 @@ describe('walletAdminService auth, deposits, withdrawals, transfers, roles & set
     assert.ok(authIdx !== -1, 'Expected /__/auth/* 200 proxy rule in public/_redirects');
     assert.ok(spaIdx !== -1, 'Expected /* /index.html 200 SPA catch-all rule in public/_redirects');
     assert.ok(authIdx < spaIdx, '/__/auth/* proxy rule must appear BEFORE /* catch-all rule');
+  });
+
+  it('saves manual platform stats cleanly and only auto-increments when autoIncrementStats is ON', async () => {
+    const initial = getInitialPlatformSettingsSync().platformStats;
+    assert.equal(initial.membersCount, 23909);
+    assert.equal(initial.totalDeposits, 4285000);
+    assert.equal(initial.totalWithdrawals, 15240600);
+    assert.equal(initial.autoIncrementStats, false);
+
+    // With autoIncrementStats OFF, real activity must NOT modify counters
+    assert.equal(
+      await incrementPlatformStatsForActivityStatic({ type: 'registration' }, 'uid-manual-1'),
+      null
+    );
+    assert.equal(
+      await incrementPlatformStatsForActivityStatic({ type: 'deposit', amount: 500 }),
+      null
+    );
+
+    // Admin saves manual update and enables Auto-Add Real Activity
+    const saved = await savePlatformStatsOnlyStatic({
+      registeredMembers: 24500,
+      membersCount: 24500,
+      totalDeposits: 4500000,
+      totalWithdrawals: 16000000,
+      autoIncrementStats: true,
+    });
+    assert.equal(saved.registeredMembers, 24500);
+    assert.equal(saved.autoIncrementStats, true);
+
+    const afterReg = await incrementPlatformStatsForActivityStatic(
+      { type: 'registration' },
+      'uid-auto-1'
+    );
+    assert.equal(afterReg?.registeredMembers, 24501);
+    // Same UID deduplicated
+    assert.equal(
+      await incrementPlatformStatsForActivityStatic({ type: 'registration' }, 'uid-auto-1'),
+      null
+    );
+
+    const afterDep = await incrementPlatformStatsForActivityStatic({ type: 'deposit', amount: 1200 });
+    assert.equal(afterDep?.totalDeposits, 4501200);
+
+    const afterWd = await incrementPlatformStatsForActivityStatic({ type: 'withdrawal', amount: 800 });
+    assert.equal(afterWd?.totalWithdrawals, 16000800);
   });
 });

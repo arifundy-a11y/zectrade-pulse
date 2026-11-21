@@ -170,9 +170,13 @@ export function mergeBuiltInAndCustomQuotes(
   builtIn: MarketQuote[],
   customCoins: AdminManagedCoin[]
 ): MarketQuote[] {
-  const customQuotes: MarketQuote[] = customCoins
-    .filter((c) => c.enabled)
-    .map((c) => ({
+  const enabledCoins = customCoins.filter((c) => c.enabled);
+  const overrideMap = new Map<string, MarketQuote>();
+  const standaloneCustom: MarketQuote[] = [];
+  const builtInSymbols = new Set(builtIn.map((q) => q.symbol));
+
+  for (const c of enabledCoins) {
+    const customQuote: MarketQuote = {
       symbol: c.symbol,
       tvSymbol: `CUSTOM:${c.symbol}`,
       label: c.label,
@@ -182,9 +186,17 @@ export function mergeBuiltInAndCustomQuotes(
       high24h: Number(c.high24h),
       low24h: Number(c.low24h),
       isCustom: true,
-    }));
-  if (builtIn.length === 0) return customQuotes;
-  return [builtIn[0], ...customQuotes, ...builtIn.slice(1)];
+    };
+    if (builtInSymbols.has(c.symbol)) {
+      overrideMap.set(c.symbol, customQuote);
+    } else {
+      standaloneCustom.push(customQuote);
+    }
+  }
+
+  const mergedBuiltIn = builtIn.map((q) => overrideMap.get(q.symbol) ?? q);
+  if (mergedBuiltIn.length === 0) return standaloneCustom;
+  return [mergedBuiltIn[0], ...standaloneCustom, ...mergedBuiltIn.slice(1)];
 }
 
 export const DEFAULT_FAQ: FaqEntry[] = [
@@ -235,6 +247,9 @@ export const DEMO_USER_TEMPLATE: UserProfile = {
   isWithdrawBlocked: false,
   invitedBy: null,
   hasDepositedBefore: false,
+  hasFirstDeposit: false,
+  totalDeposited: 0,
+  firstDepositRevokedByAdmin: false,
   hasTradedAfterDeposit: false,
   withdrawLockClearedByAdmin: false,
   demoBalance: 100000,
@@ -262,6 +277,8 @@ export const SEED_MANAGED_MEMBERS: ManagedMember[] = [
     isBlocked: false,
     isWithdrawBlocked: false,
     hasDepositedBefore: true,
+    hasFirstDeposit: true,
+    totalDeposited: 25000,
     hasTradedAfterDeposit: true,
     withdrawLockClearedByAdmin: true,
     realBalance: 25000.0,
@@ -283,6 +300,8 @@ export const SEED_MANAGED_MEMBERS: ManagedMember[] = [
     isBlocked: false,
     isWithdrawBlocked: false,
     hasDepositedBefore: false,
+    hasFirstDeposit: false,
+    totalDeposited: 0,
     hasTradedAfterDeposit: false,
     withdrawLockClearedByAdmin: false,
     realBalance: 2.0,
@@ -304,6 +323,8 @@ export const SEED_MANAGED_MEMBERS: ManagedMember[] = [
     isBlocked: false,
     isWithdrawBlocked: false,
     hasDepositedBefore: true,
+    hasFirstDeposit: true,
+    totalDeposited: 1120,
     hasTradedAfterDeposit: false,
     withdrawLockClearedByAdmin: false,
     realBalance: 1120.0,
@@ -325,6 +346,8 @@ export const SEED_MANAGED_MEMBERS: ManagedMember[] = [
     isBlocked: false,
     isWithdrawBlocked: false,
     hasDepositedBefore: true,
+    hasFirstDeposit: true,
+    totalDeposited: 8900,
     hasTradedAfterDeposit: true,
     withdrawLockClearedByAdmin: false,
     realBalance: 8900.0,

@@ -1,3 +1,6 @@
+export const FIRST_DEPOSIT_REQUIRED_MESSAGE =
+  'First Deposit Required: You must complete your first deposit before making transfers or withdrawals.';
+
 export interface P2PTransferValidationInput {
   senderUid: string;
   senderEmail: string;
@@ -6,6 +9,7 @@ export interface P2PTransferValidationInput {
   availableBalance: number;
   pinInput: string;
   expectedPin?: string;
+  hasFirstDeposit?: boolean;
   twoFactorEnabled?: boolean;
   totpCode?: string;
 }
@@ -31,6 +35,10 @@ export function roundUsd2(value: number): number {
 export function validateP2PTransferInput(
   input: P2PTransferValidationInput
 ): P2PTransferValidationResult {
+  if (input.hasFirstDeposit === false) {
+    return { ok: false, error: FIRST_DEPOSIT_REQUIRED_MESSAGE };
+  }
+
   const recipientIdentifier = input.recipientIdentifier.trim();
   if (!recipientIdentifier) {
     return { ok: false, error: 'Enter recipient UID or email.' };

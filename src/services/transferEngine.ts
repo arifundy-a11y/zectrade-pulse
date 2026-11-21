@@ -20,7 +20,16 @@ import type {
   WalletTransaction,
   WithdrawMethod,
 } from '../types';
-import { calculatePostTransferBalances, roundUsd2, validateP2PTransferInput } from '../utils/transferEngine';
+import {
+  FIRST_DEPOSIT_REQUIRED_MESSAGE,
+  calculatePostTransferBalances,
+  roundUsd2,
+  validateP2PTransferInput,
+} from '../utils/transferEngine';
+import {
+  isDepositTransactionApproved,
+  resolveHasFirstDeposit,
+} from '../utils/tradingEngine';
 import { verifyTotpCode } from '../utils/twoFactor';
 import { db, isFirebaseConfigured } from './firebaseClient';
 import { randomHexId, readStorageJson, writeStorageJson } from './storageHelper';
@@ -81,6 +90,17 @@ function appendCachedActivity(uid: string, tx: WalletTransaction): void {
 function normalizeUserDoc(id: string, d: Record<string, unknown>): ManagedMember {
   const parsedReal = Number(d.realBalance);
   const parsedDemo = Number(d.demoBalance);
+  const parsedTotalDeposited = Number(d.totalDeposited);
+  const totalDeposited =
+    Number.isFinite(parsedTotalDeposited) && parsedTotalDeposited >= 0
+      ? parsedTotalDeposited
+      : 0;
+  const firstDepositRevokedByAdmin = Boolean(d.firstDepositRevokedByAdmin);
+  const rawHasDepositedBefore = Boolean(d.hasDepositedBefore);
+  const resolvedHasFirstDeposit =
+    typeof d.hasFirstDeposit === 'boolean'
+      ? d.hasFirstDeposit || (!firstDepositRevokedByAdmin && (rawHasDepositedBefore || totalDeposited > 0))
+      : !firstDepositRevokedByAdmin && (rawHasDepositedBefore || totalDeposited > 0);
   return {
     uid: String(id || d.uid || ''),
     username: String(d.username || 'Trader'),
@@ -88,7 +108,10 @@ function normalizeUserDoc(id: string, d: Record<string, unknown>): ManagedMember
     role: (d.role as UserRole) || 'user',
     isBlocked: Boolean(d.isBlocked),
     isWithdrawBlocked: Boolean(d.isWithdrawBlocked),
-    hasDepositedBefore: Boolean(d.hasDepositedBefore),
+    hasDepositedBefore: firstDepositRevokedByAdmin ? Boolean(d.hasFirstDeposit) : resolvedHasFirstDeposit,
+    hasFirstDeposit: resolvedHasFirstDeposit,
+    totalDeposited,
+    firstDepositRevokedByAdmin,
     hasTradedAfterDeposit: Boolean(d.hasTradedAfterDeposit),
     withdrawLockClearedByAdmin: Boolean(d.withdrawLockClearedByAdmin),
     realBalance: Number.isFinite(parsedReal) ? parsedReal : 0,
@@ -237,6 +260,7 @@ export async function executeDirectP2PTransfer(params: {
   isLocalDemoSession?: boolean;
   localSenderBalance?: number;
   expectedLocalPin?: string;
+  senderHasFirstDeposit?: boolean;
   totpCode?: string;
   expectedLocalTwoFactorEnabled?: boolean;
   expectedLocalTwoFactorSecret?: string | null;
@@ -297,6 +321,13 @@ export async function executeDirectP2PTransfer(params: {
   const recTxId = `p2p-in-${nowMs}-${randomHexId(3)}`;
 
   if (params.isLocalDemoSession) {
+    const cachedSender = findCachedMember(readCachedMembers(), params.senderUid);
+    const demoHasDeposit =
+      params.senderHasFirstDeposit ??
+      (cachedSender ? resolveHasFirstDeposit(cachedSender) : false);
+    if (!demoHasDeposit) {
+      return { ok: false, error: FIRST_DEPOSIT_REQUIRED_MESSAGE };
+    }
     if (params.expectedLocalPin && params.pin !== params.expectedLocalPin) {
       return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
     }
@@ -359,6 +390,9 @@ export async function executeDirectP2PTransfer(params: {
   let sender = findCachedMember(readCachedMembers(), params.senderUid);
   let senderTwoFactorEnabled = Boolean(params.expectedLocalTwoFactorEnabled);
   let senderTwoFactorSecret = params.expectedLocalTwoFactorSecret || null;
+  let senderRevokedByAdmin = Boolean(sender?.firstDepositRevokedByAdmin);
+  let senderHasDeposit = sender ? resolveHasFirstDeposit(sender) : Boolean(params.senderHasFirstDeposit);
+
   if (isFirebaseConfigured && db) {
     try {
       const senderSnap = await fetchUserDocFresh(params.senderUid);
@@ -366,6 +400,8 @@ export async function executeDirectP2PTransfer(params: {
         const rawSender = senderSnap.data() as Record<string, unknown>;
         sender = normalizeUserDoc(senderSnap.id, rawSender);
         upsertCachedMember(sender);
+        senderRevokedByAdmin = Boolean(sender.firstDepositRevokedByAdmin);
+        senderHasDeposit = resolveHasFirstDeposit(sender);
         if (typeof rawSender.twoFactorEnabled === 'boolean') {
           senderTwoFactorEnabled = rawSender.twoFactorEnabled;
         }
@@ -376,11 +412,43 @@ export async function executeDirectP2PTransfer(params: {
     } catch {
       // Offline / rule fallback
     }
+
+    // Backward compatibility: if user doc flags are absent/false (and not explicitly revoked by admin),
+    // check Firestore transaction history for any approved/completed deposit.
+    if (!senderHasDeposit && !senderRevokedByAdmin) {
+      try {
+        const txSnap = await fetchQueryFresh(collection(db, 'users', params.senderUid, 'transactions'));
+        const hasApprovedTx = txSnap.docs.some((d) => {
+          const raw = d.data() as Record<string, unknown>;
+          return isDepositTransactionApproved({
+            type: String(raw.type || ''),
+            status: String(raw.status || ''),
+          });
+        });
+        if (hasApprovedTx) {
+          senderHasDeposit = true;
+        }
+      } catch {
+        // Ignore transaction history lookup fallback
+      }
+    }
+  }
+
+  if (!senderHasDeposit && !senderRevokedByAdmin) {
+    const localActivity = readStorageJson<WalletTransaction[]>(`${MEMBER_ACTIVITY_PREFIX}${params.senderUid}`) ?? [];
+    if (localActivity.some((tx) => isDepositTransactionApproved(tx))) {
+      senderHasDeposit = true;
+    } else if (params.senderHasFirstDeposit === true) {
+      senderHasDeposit = true;
+    }
   }
 
   const senderPin = sender?.securityPin ?? params.expectedLocalPin ?? '1234';
   if (sender?.isBlocked) {
     return { ok: false, error: 'Your account is restricted.' };
+  }
+  if (!senderHasDeposit) {
+    return { ok: false, error: FIRST_DEPOSIT_REQUIRED_MESSAGE };
   }
   if (senderPin !== params.pin) {
     return { ok: false, error: 'Incorrect 4-digit Security PIN.' };
@@ -424,6 +492,24 @@ export async function executeDirectP2PTransfer(params: {
 
         if (senderData?.isBlocked) {
           throw new Error('BUSINESS:Your account is restricted.');
+        }
+
+        const txSenderHasDeposit =
+          senderHasDeposit ||
+          (senderData
+            ? resolveHasFirstDeposit({
+                hasFirstDeposit:
+                  typeof senderData.hasFirstDeposit === 'boolean'
+                    ? senderData.hasFirstDeposit
+                    : undefined,
+                hasDepositedBefore: Boolean(senderData.hasDepositedBefore),
+                totalDeposited: Number(senderData.totalDeposited || 0),
+                firstDepositRevokedByAdmin: Boolean(senderData.firstDepositRevokedByAdmin),
+              })
+            : false);
+
+        if (!txSenderHasDeposit) {
+          throw new Error(`BUSINESS:${FIRST_DEPOSIT_REQUIRED_MESSAGE}`);
         }
 
         if (senderData?.securityPin && String(senderData.securityPin) !== params.pin) {

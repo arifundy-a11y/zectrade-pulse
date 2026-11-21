@@ -31,6 +31,7 @@ import {
 import type {
   AccountMode,
   AdminManagedCoin,
+  CanonicalPlatformStats,
   CoinScheduleMode,
   CoinTradeAnalytics,
   CoinTrendBias,
@@ -59,6 +60,11 @@ import { LotteryAdminConsole, type DigitDrawSchedulePayload } from './LotteryAdm
 import { resolveNewsImageSrc } from './NewsWorkspace';
 import { NEWS_CATEGORIES, formatNewsTimestamp } from '../utils/newsUtils';
 import {
+  applyStatQuickAdjust,
+  formatStatDisplay,
+  normalizePlatformStats,
+} from '../utils/platformStats';
+import {
   DEFAULT_BRAND_LOGO_URL,
   calculateSpotSwap,
   computeScheduledCoinPrice,
@@ -68,12 +74,14 @@ import {
   generateWalletCsv,
   getAllowedStaffTabs,
   normalizeBrandLogoUrl,
+  resolveHasFirstDeposit,
   resolveWithdrawDefaults,
   sanitizeMemberNoticeText,
 } from '../utils/tradingEngine';
 import { formatChartPrice } from '../utils/chartEngine';
 import { getAvatarInitials, resizeImageFileToAvatarDataUrl } from '../utils/avatarHelper';
 import {
+  FIRST_DEPOSIT_REQUIRED_MESSAGE,
   calculatePostTransferBalances,
   roundUsd2,
   validateP2PTransferInput,
@@ -448,10 +456,12 @@ export const WithdrawModal: React.FC<{
   );
 
   const eligibility = evaluateWithdrawalEligibility(user);
+  const hasFirstDeposit = resolveHasFirstDeposit(user);
+  const withdrawAllowed = hasFirstDeposit && eligibility.allowed;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!eligibility.allowed) return;
+    if (!withdrawAllowed) return;
     const targetDesc =
       `${isMmkMethod && holderName.trim() ? `${holderName.trim()} (${target.trim()})` : target.trim()}` +
       `${isMmkMethod ? ` (${mmkAmount.toLocaleString('en-US')} MMK)` : ''}`;
@@ -468,18 +478,25 @@ export const WithdrawModal: React.FC<{
   return (
     <ModalShell title="Withdraw Funds" onClose={onClose}>
       <form onSubmit={handleSubmit} className="space-y-3">
-        {!eligibility.allowed && (
+        {!withdrawAllowed && (
           <div
+            role="alert"
             data-testid="withdraw-lock-banner"
             className="bg-red-950/50 border border-red-500/40 rounded-xl p-3 text-[11px] text-red-200 flex items-center justify-between gap-2.5"
           >
             <div className="min-w-0">
               <strong className="block text-red-300 mb-0.5">
-                {eligibility.lockType === 'no_deposit' ? 'First Deposit Required' : 'Withdrawal Locked'}
+                {!hasFirstDeposit || eligibility.lockType === 'no_deposit'
+                  ? 'First Deposit Required'
+                  : 'Withdrawal Locked'}
               </strong>
-              <span>{eligibility.reason}</span>
+              <span>
+                {!hasFirstDeposit || eligibility.lockType === 'no_deposit'
+                  ? 'You must complete your first deposit before making transfers or withdrawals.'
+                  : eligibility.reason}
+              </span>
             </div>
-            {eligibility.lockType === 'no_deposit' && onOpenDeposit && (
+            {(!hasFirstDeposit || eligibility.lockType === 'no_deposit') && onOpenDeposit && (
               <button
                 type="button"
                 data-testid="withdraw-make-deposit-btn"
@@ -489,7 +506,7 @@ export const WithdrawModal: React.FC<{
                 }}
                 className="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition-colors"
               >
-                Make First Deposit
+                Deposit Now
               </button>
             )}
           </div>
@@ -674,10 +691,11 @@ export const WithdrawModal: React.FC<{
           </button>
           <button
             type="submit"
-            disabled={!eligibility.allowed}
+            disabled={!withdrawAllowed}
+            data-testid="withdraw-submit-btn"
             className="py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white text-xs font-bold"
           >
-            {eligibility.allowed ? 'Confirm Withdrawal' : 'Withdraw Locked'}
+            {withdrawAllowed ? 'Confirm Withdrawal' : 'Withdraw Locked'}
           </button>
         </div>
       </form>
@@ -698,6 +716,8 @@ export const TransferModal: React.FC<{
   currentUserUid: string;
   currentUserEmail: string;
   userPin: string;
+  hasFirstDeposit?: boolean;
+  onOpenDeposit?: () => void;
   twoFactorEnabled?: boolean;
   onVerifyTwoFactor?: (code: string) => boolean;
   onLookupRecipient: (
@@ -716,6 +736,8 @@ export const TransferModal: React.FC<{
   currentUserUid,
   currentUserEmail,
   userPin,
+  hasFirstDeposit = false,
+  onOpenDeposit,
   twoFactorEnabled = false,
   onVerifyTwoFactor,
   onLookupRecipient,
@@ -746,6 +768,10 @@ export const TransferModal: React.FC<{
   const handleReviewTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    if (!hasFirstDeposit) {
+      setErrorMsg(FIRST_DEPOSIT_REQUIRED_MESSAGE);
+      return;
+    }
 
     const validation = validateP2PTransferInput({
       senderUid: currentUserUid,
@@ -755,6 +781,7 @@ export const TransferModal: React.FC<{
       availableBalance,
       pinInput: pin,
       expectedPin: userPin,
+      hasFirstDeposit,
       twoFactorEnabled,
       totpCode,
     });
@@ -784,6 +811,10 @@ export const TransferModal: React.FC<{
   };
 
   const handleConfirmSend = async () => {
+    if (!hasFirstDeposit) {
+      setErrorMsg(FIRST_DEPOSIT_REQUIRED_MESSAGE);
+      return;
+    }
     if (!verifiedRecipient) return;
     setErrorMsg(null);
     setSubmitting(true);
@@ -807,6 +838,32 @@ export const TransferModal: React.FC<{
   return (
     <ModalShell title="Direct P2P Transfer" onClose={onClose}>
       <div className="space-y-3">
+        {!hasFirstDeposit && (
+          <div
+            role="alert"
+            data-testid="transfer-first-deposit-alert"
+            className="bg-red-950/50 border border-red-500/40 rounded-xl p-3 text-[11px] text-red-200 flex items-center justify-between gap-2.5"
+          >
+            <div className="min-w-0">
+              <strong className="block text-red-300 mb-0.5">First Deposit Required</strong>
+              <span>You must complete your first deposit before making transfers or withdrawals.</span>
+            </div>
+            {onOpenDeposit && (
+              <button
+                type="button"
+                data-testid="transfer-deposit-now-btn"
+                onClick={() => {
+                  onClose();
+                  onOpenDeposit();
+                }}
+                className="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition-colors"
+              >
+                Deposit Now
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Available Balance Banner */}
         <div
           data-testid="transfer-available-balance"
@@ -827,7 +884,7 @@ export const TransferModal: React.FC<{
           {step === 'form' && (
             <button
               type="button"
-              disabled={availableBalance < 1}
+              disabled={!hasFirstDeposit || availableBalance < 1}
               onClick={() => {
                 setErrorMsg(null);
                 setAmountInput(String(Math.floor(availableBalance * 100) / 100));
@@ -973,11 +1030,11 @@ export const TransferModal: React.FC<{
               </button>
               <button
                 type="submit"
-                disabled={verifying || exceedsBalance}
+                disabled={!hasFirstDeposit || verifying || exceedsBalance}
                 data-testid="transfer-review-btn"
-                className="py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold transition-colors"
+                className="py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white text-xs font-bold transition-colors"
               >
-                {verifying ? 'Verifying...' : 'Continue'}
+                {!hasFirstDeposit ? 'Deposit Required' : verifying ? 'Verifying...' : 'Continue'}
               </button>
             </div>
           </form>
@@ -1031,7 +1088,7 @@ export const TransferModal: React.FC<{
               </button>
               <button
                 type="button"
-                disabled={submitting}
+                disabled={!hasFirstDeposit || submitting}
                 onClick={handleConfirmSend}
                 data-testid="transfer-confirm-btn"
                 className="py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold transition-colors"
@@ -1736,6 +1793,7 @@ export const StaffControlModal: React.FC<{
   onSearchMembers: (queryText: string) => Promise<void>;
   onToggleBlockMember: (uid: string, blocked: boolean) => Promise<void>;
   onToggleWithdrawBlock: (uid: string, blocked: boolean) => Promise<void>;
+  onToggleFirstDeposit?: (uid: string, hasDeposited: boolean) => Promise<void>;
   onClearWithdrawLock: (uid: string) => Promise<void>;
   onAdjustMemberBalance: (
     uid: string,
@@ -1752,6 +1810,7 @@ export const StaffControlModal: React.FC<{
     withdrawRateMMK: number;
     depositAccounts: DepositAccounts;
   }) => Promise<void>;
+  onSavePlatformStatsOnly?: (stats: CanonicalPlatformStats) => Promise<void>;
   adminCoins: AdminManagedCoin[];
   selectedCoinAnalytics: CoinTradeAnalytics | null;
   coinAnalyticsLoading: boolean;
@@ -1854,11 +1913,13 @@ export const StaffControlModal: React.FC<{
   onSearchMembers,
   onToggleBlockMember,
   onToggleWithdrawBlock,
+  onToggleFirstDeposit,
   onClearWithdrawLock,
   onAdjustMemberBalance,
   onAssignMemberRole,
   onAdminUpdateMemberProfile,
   onSaveSettings,
+  onSavePlatformStatsOnly,
   adminCoins,
   selectedCoinAnalytics,
   coinAnalyticsLoading,
@@ -1896,10 +1957,14 @@ export const StaffControlModal: React.FC<{
   const [tab, setTab] = useState<StaffTabId>(defaultInitialTab);
 
   // Settings Tab State
+  const initialNormalizedStats = normalizePlatformStats(platformStats);
   const [csr, setCsr] = useState(csrTelegramLink);
-  const [membersCount, setMembersCount] = useState(String(platformStats.membersCount));
-  const [totalDeposits, setTotalDeposits] = useState(platformStats.totalDeposits);
-  const [totalWithdrawals, setTotalWithdrawals] = useState(platformStats.totalWithdrawals);
+  const [statsMembers, setStatsMembers] = useState(String(initialNormalizedStats.registeredMembers));
+  const [statsDeposits, setStatsDeposits] = useState(String(initialNormalizedStats.totalDeposits));
+  const [statsWithdrawals, setStatsWithdrawals] = useState(String(initialNormalizedStats.totalWithdrawals));
+  const [statsAutoIncrement, setStatsAutoIncrement] = useState(initialNormalizedStats.autoIncrementStats);
+  const [statsBusy, setStatsBusy] = useState(false);
+  const [statsDirty, setStatsDirty] = useState(false);
   const [depRate, setDepRate] = useState(String(depositRateMMK));
   const [wdRate, setWdRate] = useState(String(withdrawRateMMK));
   const [kpayName, setKpayName] = useState(depositAccounts.kpay.name);
@@ -2104,15 +2169,63 @@ export const StaffControlModal: React.FC<{
     };
   }, [isAdmin, tab, activeCoinSym]);
 
+  useEffect(() => {
+    if (statsDirty) return;
+    const synced = normalizePlatformStats(platformStats);
+    setStatsMembers(String(synced.registeredMembers));
+    setStatsDeposits(String(synced.totalDeposits));
+    setStatsWithdrawals(String(synced.totalWithdrawals));
+    setStatsAutoIncrement(synced.autoIncrementStats);
+  }, [platformStats, statsDirty]);
+
+  const buildDraftPlatformStats = (): CanonicalPlatformStats => {
+    const parsed = normalizePlatformStats({
+      registeredMembers: statsMembers,
+      membersCount: statsMembers,
+      totalDeposits: statsDeposits,
+      totalWithdrawals: statsWithdrawals,
+      autoIncrementStats: statsAutoIncrement,
+    });
+    return parsed;
+  };
+
+  const handleSavePlatformStatsCard = async () => {
+    setStatsBusy(true);
+    try {
+      const nextStats = buildDraftPlatformStats();
+      setStatsMembers(String(nextStats.registeredMembers));
+      setStatsDeposits(String(nextStats.totalDeposits));
+      setStatsWithdrawals(String(nextStats.totalWithdrawals));
+      setStatsAutoIncrement(nextStats.autoIncrementStats);
+      setStatsDirty(false);
+      if (onSavePlatformStatsOnly) {
+        await onSavePlatformStatsOnly(nextStats);
+      } else {
+        await onSaveSettings({
+          csrTelegramLink: csr.trim() || csrTelegramLink,
+          platformStats: nextStats,
+          depositRateMMK: Number(depRate) || 4300,
+          withdrawRateMMK: Number(wdRate) || 4300,
+          depositAccounts: {
+            ...depositAccounts,
+            kpay: { name: kpayName, number: kpayNum },
+            wavepay: { name: waveName, number: waveNum },
+            usdt: { name: 'TRC20 Wallet', number: usdtAddr },
+          },
+        });
+      }
+    } finally {
+      setStatsBusy(false);
+    }
+  };
+
   const handleSaveRates = async (e: React.FormEvent) => {
     e.preventDefault();
+    const nextStats = buildDraftPlatformStats();
+    setStatsDirty(false);
     await onSaveSettings({
       csrTelegramLink: csr.trim() || csrTelegramLink,
-      platformStats: {
-        membersCount: Number(membersCount) || platformStats.membersCount,
-        totalDeposits,
-        totalWithdrawals,
-      },
+      platformStats: nextStats,
       depositRateMMK: Number(depRate) || 4300,
       withdrawRateMMK: Number(wdRate) || 4300,
       depositAccounts: {
@@ -2378,6 +2491,207 @@ export const StaffControlModal: React.FC<{
             </div>
           )}
 
+          {/* Dedicated Platform Stats Control Card */}
+          <div
+            data-testid="admin-platform-stats-control"
+            className="bg-slate-950/90 border border-emerald-500/30 rounded-xl p-3 sm:p-4 space-y-3 text-xs"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+              <div>
+                <h4 className="font-bold text-white flex items-center gap-1.5">
+                  <Activity className="w-4 h-4 text-emerald-400" aria-hidden="true" />
+                  <span>Platform Stats Control</span>
+                </h4>
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  Updates live across all landing pages instantly via Firestore.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold text-slate-300">Auto-Add Real Activity</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={statsAutoIncrement}
+                  data-testid="admin-stats-auto-toggle"
+                  onClick={() => {
+                    setStatsDirty(true);
+                    setStatsAutoIncrement((prev) => !prev);
+                  }}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                    statsAutoIncrement ? 'bg-emerald-500' : 'bg-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                      statsAutoIncrement ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            <p className="text-[10px] text-slate-400">
+              {statsAutoIncrement
+                ? 'Auto-Add ON: New sign-ups and Admin-approved deposits/withdrawals automatically increment these counters.'
+                : 'Auto-Add OFF: Landing counters stay strictly fixed at your manual Admin values.'}
+            </p>
+
+            {/* Registered Members */}
+            <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="admin-stat-members" className="text-[11px] font-semibold text-slate-200">
+                  Registered Members
+                </label>
+                <span className="text-[11px] font-mono tabular-nums text-white font-bold">
+                  {formatStatDisplay(Number(statsMembers) || 0)}
+                </span>
+              </div>
+              <input
+                id="admin-stat-members"
+                data-testid="admin-stats-members-input"
+                type="number"
+                min="0"
+                step="1"
+                value={statsMembers}
+                onChange={(e) => {
+                  setStatsDirty(true);
+                  setStatsMembers(e.target.value);
+                }}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono tabular-nums text-white"
+              />
+              <div className="flex flex-wrap gap-1.5">
+                {[-100, -10, 10, 100, 1000].map((delta) => (
+                  <button
+                    key={delta}
+                    type="button"
+                    data-testid={`admin-stats-members-adj-${delta}`}
+                    onClick={() => {
+                      setStatsDirty(true);
+                      setStatsMembers((prev) =>
+                        String(applyStatQuickAdjust(Number(prev) || 0, delta))
+                      );
+                    }}
+                    className={`px-2 py-1 rounded text-[10px] font-mono font-semibold border transition-colors ${
+                      delta < 0
+                        ? 'bg-red-950/40 hover:bg-red-900/50 border-red-500/30 text-red-300'
+                        : 'bg-emerald-950/40 hover:bg-emerald-900/50 border-emerald-500/30 text-emerald-300'
+                    }`}
+                  >
+                    {delta > 0 ? `+${delta.toLocaleString('en-US')}` : delta.toLocaleString('en-US')}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Total Deposits ($) */}
+            <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="admin-stat-deposits" className="text-[11px] font-semibold text-slate-200">
+                  Total Deposits ($)
+                </label>
+                <span className="text-[11px] font-mono tabular-nums text-emerald-400 font-bold">
+                  {formatStatDisplay(Number(statsDeposits) || 0, '$')}
+                </span>
+              </div>
+              <input
+                id="admin-stat-deposits"
+                data-testid="admin-stats-deposits-input"
+                type="number"
+                min="0"
+                step="1"
+                value={statsDeposits}
+                onChange={(e) => {
+                  setStatsDirty(true);
+                  setStatsDeposits(e.target.value);
+                }}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono tabular-nums text-emerald-400"
+              />
+              <div className="flex flex-wrap gap-1.5">
+                {[-10000, -1000, 1000, 10000, 50000].map((delta) => (
+                  <button
+                    key={delta}
+                    type="button"
+                    data-testid={`admin-stats-deposits-adj-${delta}`}
+                    onClick={() => {
+                      setStatsDirty(true);
+                      setStatsDeposits((prev) =>
+                        String(applyStatQuickAdjust(Number(prev) || 0, delta))
+                      );
+                    }}
+                    className={`px-2 py-1 rounded text-[10px] font-mono font-semibold border transition-colors ${
+                      delta < 0
+                        ? 'bg-red-950/40 hover:bg-red-900/50 border-red-500/30 text-red-300'
+                        : 'bg-emerald-950/40 hover:bg-emerald-900/50 border-emerald-500/30 text-emerald-300'
+                    }`}
+                  >
+                    {delta < 0
+                      ? `-$${Math.abs(delta).toLocaleString('en-US')}`
+                      : `+$${delta.toLocaleString('en-US')}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Total Withdrawals ($) */}
+            <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="admin-stat-withdrawals" className="text-[11px] font-semibold text-slate-200">
+                  Total Withdrawals ($)
+                </label>
+                <span className="text-[11px] font-mono tabular-nums text-amber-400 font-bold">
+                  {formatStatDisplay(Number(statsWithdrawals) || 0, '$')}
+                </span>
+              </div>
+              <input
+                id="admin-stat-withdrawals"
+                data-testid="admin-stats-withdrawals-input"
+                type="number"
+                min="0"
+                step="1"
+                value={statsWithdrawals}
+                onChange={(e) => {
+                  setStatsDirty(true);
+                  setStatsWithdrawals(e.target.value);
+                }}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono tabular-nums text-amber-400"
+              />
+              <div className="flex flex-wrap gap-1.5">
+                {[-10000, -1000, 1000, 10000, 50000].map((delta) => (
+                  <button
+                    key={delta}
+                    type="button"
+                    data-testid={`admin-stats-withdrawals-adj-${delta}`}
+                    onClick={() => {
+                      setStatsDirty(true);
+                      setStatsWithdrawals((prev) =>
+                        String(applyStatQuickAdjust(Number(prev) || 0, delta))
+                      );
+                    }}
+                    className={`px-2 py-1 rounded text-[10px] font-mono font-semibold border transition-colors ${
+                      delta < 0
+                        ? 'bg-red-950/40 hover:bg-red-900/50 border-red-500/30 text-red-300'
+                        : 'bg-amber-950/40 hover:bg-amber-900/50 border-amber-500/30 text-amber-300'
+                    }`}
+                  >
+                    {delta < 0
+                      ? `-$${Math.abs(delta).toLocaleString('en-US')}`
+                      : `+$${delta.toLocaleString('en-US')}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              disabled={statsBusy}
+              data-testid="admin-save-stats-btn"
+              onClick={handleSavePlatformStatsCard}
+              className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold transition-colors"
+            >
+              {statsBusy ? 'Saving Stats...' : 'Save Stats'}
+            </button>
+          </div>
+
         <form onSubmit={handleSaveRates} className="space-y-3 text-xs">
           <div>
             <label className="text-[10px] text-slate-400 block mb-1">CSR Telegram Support Link</label>
@@ -2387,41 +2701,6 @@ export const StaffControlModal: React.FC<{
               onChange={(e) => setCsr(e.target.value)}
               className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-2 text-sky-300 font-mono"
             />
-          </div>
-
-          <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3 space-y-2">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
-              Landing Display Totals (Social Proof)
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <div>
-                <label className="text-[10px] text-slate-400 block mb-1">Members Count</label>
-                <input
-                  type="number"
-                  value={membersCount}
-                  onChange={(e) => setMembersCount(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-white"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] text-slate-400 block mb-1">Total Deposits</label>
-                <input
-                  type="text"
-                  value={totalDeposits}
-                  onChange={(e) => setTotalDeposits(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-emerald-400"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] text-slate-400 block mb-1">Total Withdrawals</label>
-                <input
-                  type="text"
-                  value={totalWithdrawals}
-                  onChange={(e) => setTotalWithdrawals(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 font-mono text-amber-400"
-                />
-              </div>
-            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-2">
@@ -4528,10 +4807,14 @@ export const StaffControlModal: React.FC<{
                 const amtStr = adjustAmounts[member.uid] ?? '100';
                 const draftRole = roleDrafts[member.uid] ?? member.role;
                 const isSelf = member.uid === currentUserUid;
+                const memberHasFirstDeposit = resolveHasFirstDeposit(member);
                 const wdStatus = evaluateWithdrawalEligibility({
                   isBlocked: member.isBlocked,
                   isWithdrawBlocked: member.isWithdrawBlocked,
                   hasDepositedBefore: !!member.hasDepositedBefore,
+                  hasFirstDeposit: member.hasFirstDeposit,
+                  totalDeposited: member.totalDeposited,
+                  firstDepositRevokedByAdmin: member.firstDepositRevokedByAdmin,
                   hasTradedAfterDeposit: !!member.hasTradedAfterDeposit,
                   withdrawLockClearedByAdmin: !!member.withdrawLockClearedByAdmin,
                 });
@@ -4590,7 +4873,17 @@ export const StaffControlModal: React.FC<{
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <span
+                          data-testid={`member-deposit-badge-${member.uid}`}
+                          className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                            memberHasFirstDeposit
+                              ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                              : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                          }`}
+                        >
+                          {memberHasFirstDeposit ? 'Deposited' : 'No Deposit'}
+                        </span>
                         {isAdmin && (
                           <button
                             type="button"
@@ -4652,8 +4945,11 @@ export const StaffControlModal: React.FC<{
                       </div>
                       <div>
                         <span className="text-[10px] text-slate-500 block font-sans">Deposited</span>
-                        <span className={member.hasDepositedBefore ? 'text-emerald-400 font-bold' : 'text-slate-400'}>
-                          {member.hasDepositedBefore ? 'YES' : 'NO'}
+                        <span className={memberHasFirstDeposit ? 'text-emerald-400 font-bold' : 'text-slate-400'}>
+                          {memberHasFirstDeposit ? 'YES' : 'NO'}
+                        </span>
+                        <span className="text-[10px] text-slate-400 ml-1 font-normal">
+                          (${Number(member.totalDeposited || 0).toFixed(2)})
                         </span>
                       </div>
                       <div>
@@ -4929,8 +5225,8 @@ export const StaffControlModal: React.FC<{
                       </div>
                     )}
 
-                    {/* Block / Unblock / Clear Withdraw Lock Actions */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {/* Block / Unblock / Clear Withdraw Lock / Toggle First Deposit Actions */}
+                    <div className={`grid grid-cols-1 ${isAdmin && onToggleFirstDeposit ? 'sm:grid-cols-4' : 'sm:grid-cols-3'} gap-2`}>
                       <button
                         type="button"
                         onClick={() => onToggleWithdrawBlock(member.uid, !member.isWithdrawBlocked)}
@@ -4984,6 +5280,22 @@ export const StaffControlModal: React.FC<{
                         >
                           <CheckCircle2 className="w-3.5 h-3.5" />
                           <span>Clear Withdraw Lock</span>
+                        </button>
+                      )}
+
+                      {isAdmin && onToggleFirstDeposit && (
+                        <button
+                          type="button"
+                          data-testid={`admin-toggle-deposit-${member.uid}`}
+                          onClick={() => onToggleFirstDeposit(member.uid, !memberHasFirstDeposit)}
+                          className={`py-1.5 px-2.5 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 border transition ${
+                            memberHasFirstDeposit
+                              ? 'bg-slate-800 hover:bg-slate-700 text-amber-300 border-slate-700'
+                              : 'bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border-emerald-500/40'
+                          }`}
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>{memberHasFirstDeposit ? 'Mark No Deposit' : 'Mark Deposited'}</span>
                         </button>
                       )}
                     </div>
