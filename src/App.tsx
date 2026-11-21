@@ -26,6 +26,7 @@ import {
   where,
 } from 'firebase/firestore';
 import { X } from 'lucide-react';
+import { AuthActionPage } from './components/AuthActionPage';
 import { AuthLanding } from './components/AuthLanding';
 import type { DigitDrawSchedulePayload } from './components/LotteryAdminConsole';
 import { LotteryLiveWorkspace } from './components/LotteryLiveWorkspace';
@@ -51,6 +52,11 @@ import { WalletWorkspace } from './components/WalletWorkspace';
 import {
   deduplicateFirestoreAgainstSql,
 } from './utils/depositHistory';
+import {
+  parseAuthActionLocation,
+  ZECTRADE_ACTION_CODE_SETTINGS,
+  type ParsedAuthActionRoute,
+} from './utils/authAction';
 import { appendDeterministicLiveFeedItem } from './utils/liveFeed';
 import { verifyTotpCode } from './utils/twoFactor';
 import {
@@ -194,6 +200,21 @@ export default function App() {
   const [selectedSymbol, setSelectedSymbol] = useState<MarketSymbol>('BTCUSDT');
   const [activeSection, setActiveSection] = useState<AppSection>('trade');
   const [accountMode, setAccountMode] = useState<AccountMode>('demo');
+  const [authActionRoute, setAuthActionRoute] = useState<ParsedAuthActionRoute>(() =>
+    typeof window !== 'undefined'
+      ? parseAuthActionLocation(window.location.pathname, window.location.search)
+      : { isAuthActionRoute: false, mode: 'unknown', oobCode: '', continueUrl: null }
+  );
+  const [landingAuthMode, setLandingAuthMode] = useState<'register' | 'login' | 'forgot'>('register');
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handlePopState = () => {
+      setAuthActionRoute(parseAuthActionLocation(window.location.pathname, window.location.search));
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   const [user, setUser] = useState<UserProfile>(() => {
     try {
@@ -2255,7 +2276,7 @@ export default function App() {
           showToast('Password reset requires Firebase configuration.', 'error');
           return;
         }
-        await sendPasswordResetEmail(auth, payload.email);
+        await sendPasswordResetEmail(auth, payload.email, ZECTRADE_ACTION_CODE_SETTINGS);
         showToast(`Password reset email sent to ${payload.email}.`);
         return;
       }
@@ -2320,7 +2341,7 @@ export default function App() {
 
       if (payload.mode === 'register') {
         const cred = await createUserWithEmailAndPassword(auth, payload.email, payload.password);
-        await sendEmailVerification(cred.user).catch(() => {});
+        await sendEmailVerification(cred.user, ZECTRADE_ACTION_CODE_SETTINGS).catch(() => {});
         const name = payload.username || payload.email.split('@')[0];
         const cleanRegEmail = payload.email.trim().toLowerCase();
         await setDoc(doc(db, 'users', cred.user.uid), {
@@ -2988,7 +3009,7 @@ export default function App() {
       return { ok: false };
     }
     try {
-      await sendEmailVerification(auth.currentUser);
+      await sendEmailVerification(auth.currentUser, ZECTRADE_ACTION_CODE_SETTINGS);
       showToast(`Verification link sent to ${auth.currentUser.email || user.email}.`);
       return { ok: true, sentAtMs: Date.now() };
     } catch (err: unknown) {
@@ -3858,7 +3879,54 @@ export default function App() {
       />
 
       {/* Main Content */}
-      {!user.isLoggedIn ? (
+      {authActionRoute.isAuthActionRoute ? (
+        <AuthActionPage
+          route={authActionRoute}
+          brandLogoUrl={brandLogoUrl}
+          isLoggedIn={user.isLoggedIn}
+          onBackToLogin={() => {
+            if (typeof window !== 'undefined') {
+              window.history.replaceState({}, '', '/');
+            }
+            setAuthActionRoute({
+              isAuthActionRoute: false,
+              mode: 'unknown',
+              oobCode: '',
+              continueUrl: null,
+            });
+            setLandingAuthMode('login');
+            if (user.isLoggedIn) {
+              void handleLogout();
+            }
+          }}
+          onContinueToAccount={() => {
+            if (typeof window !== 'undefined') {
+              window.history.replaceState({}, '', '/');
+            }
+            setAuthActionRoute({
+              isAuthActionRoute: false,
+              mode: 'unknown',
+              oobCode: '',
+              continueUrl: null,
+            });
+            setActiveSection('profile');
+          }}
+          onEmailVerified={async () => {
+            if (auth?.currentUser) {
+              await auth.currentUser.reload().catch(() => {});
+              if (db && auth.currentUser.uid) {
+                await setDoc(
+                  doc(db, 'users', auth.currentUser.uid),
+                  { emailVerified: true },
+                  { merge: true }
+                ).catch(() => {});
+              }
+            }
+            setUser((prev) => ({ ...prev, emailVerified: true }));
+          }}
+          onShowToast={showToast}
+        />
+      ) : !user.isLoggedIn ? (
         <AuthLanding
           quotes={quotes}
           platformStats={platformStats}
@@ -3866,6 +3934,7 @@ export default function App() {
           faqEntries={faqEntries}
           liveFeedItems={liveFeedItems}
           csrTelegramLink={csrTelegramLink}
+          initialAuthMode={landingAuthMode}
           onAuthSubmit={handleAuthSubmit}
           onGoogleSignIn={handleGoogleSignIn}
           onEnterDemoWorkspace={handleEnterDemoWorkspace}

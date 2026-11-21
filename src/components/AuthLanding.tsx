@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ChevronDown, Eye, EyeOff, ArrowUpRight, ArrowDownLeft, Trophy, ShieldCheck, Layers, Info, AlertTriangle } from 'lucide-react';
 import type { FaqEntry, LiveFeedItem, MarketQuote, PlatformStats } from '../types';
 import { normalizePlatformStats } from '../utils/platformStats';
@@ -11,6 +11,7 @@ interface AuthLandingProps {
   faqEntries: FaqEntry[];
   liveFeedItems: LiveFeedItem[];
   csrTelegramLink: string;
+  initialAuthMode?: 'register' | 'login' | 'forgot';
   onAuthSubmit: (payload: {
     mode: 'register' | 'login' | 'forgot';
     email: string;
@@ -29,11 +30,19 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
   faqEntries,
   liveFeedItems,
   csrTelegramLink,
+  initialAuthMode,
   onAuthSubmit,
   onGoogleSignIn,
   onEnterDemoWorkspace,
 }) => {
-  const [authMode, setAuthMode] = useState<'register' | 'login' | 'forgot'>('register');
+  const [authMode, setAuthMode] = useState<'register' | 'login' | 'forgot'>(
+    initialAuthMode ?? 'register'
+  );
+  useEffect(() => {
+    if (initialAuthMode) {
+      setAuthMode(initialAuthMode);
+    }
+  }, [initialAuthMode]);
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
