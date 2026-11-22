@@ -32,7 +32,9 @@ import {
   getCandleBucketStartMs,
   getTickOptionsForPrice,
   hasFlatCandles,
+  initializeCustomCoinCandlesSeries,
   mulberry32,
+  normalizeCandleTimeMs,
   rollOverCustomCoinCandles,
   stepCandleBucketMs,
 } from './chartEngine';
@@ -422,7 +424,37 @@ test('rollOverCustomCoinCandles and applyCustomCoinLiveTickToSeries freeze close
   assert.equal(catchUp.candles[catchUp.candles.length - 2].time, stepCandleBucketMs(t1, '1m', 2));
 });
 
+test('normalizeCandleTimeMs converts seconds < 1e12 to ms and auto-initializes empty custom candle series cleanly', () => {
+  const tSec = 1763140020; // seconds (< 1e12)
+  const tMs = normalizeCandleTimeMs(tSec);
+  assert.equal(tMs, 1763140020000);
+  assert.equal(normalizeCandleTimeMs(tMs), tMs);
 
+  // Rolling over a candle whose time arrived in seconds converts to ms cleanly
+  const secSeries = [
+    { time: tSec - 60, open: 62.5, high: 63.0, low: 62.2, close: 62.8, volume: 100 },
+    { time: tSec, open: 62.8, high: 63.1, low: 62.7, close: 62.95, volume: 120 },
+  ];
+  const rolledFromSec = rollOverCustomCoinCandles(secSeries, '1m', (tSec + 65) * 1000, 201);
+  assert.equal(rolledFromSec.rolledCount, 1);
+  assert.equal(rolledFromSec.candles.length, 3);
+  assert.equal(rolledFromSec.candles[0].time, (tSec - 60) * 1000);
+  assert.equal(rolledFromSec.candles[2].time, (tSec + 60) * 1000);
+  assert.equal(rolledFromSec.candles[2].open, 62.95);
 
+  // Empty prev array with initFallback synchronously yields 200 historical + 1 active = 201 candles
+  const nowBucket = getCandleBucketStartMs(1763140200000, '1m');
+  const initialized = initializeCustomCoinCandlesSeries('XUUSDT', 63.1, '1m', 63.25, nowBucket + 12_000);
+  assert.equal(initialized.length, 201);
+  assert.equal(initialized[200].time, nowBucket);
+  assert.equal(initialized[200].close, 63.25);
 
-
+  const autoTicked = applyCustomCoinLiveTickToSeries([], '1m', 63.4, nowBucket + 18_000, 201, {
+    symbol: 'XUUSDT',
+    anchorPrice: 63.1,
+    options: { trendBias: 'up', volatilityLevel: 'normal' },
+  });
+  assert.equal(autoTicked.candles.length, 201);
+  assert.equal(autoTicked.candles[200].time, nowBucket);
+  assert.equal(autoTicked.candles[200].close, 63.4);
+});
