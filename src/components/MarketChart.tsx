@@ -71,7 +71,8 @@ interface MarketChartProps {
 const TIMEFRAMES: ChartTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1mo'];
 const TOTAL_CANDLES = 200;
 const BINANCE_HISTORY_LIMIT = 200;
-const CUSTOM_COIN_TOTAL_CANDLES = BINANCE_HISTORY_LIMIT + 1;
+const CUSTOM_COIN_HISTORICAL_CANDLES = 150;
+const CUSTOM_COIN_MAX_CANDLES = 300;
 const DEFAULT_VISIBLE_CANDLES = 48;
 const MIN_VISIBLE_CANDLES = 18;
 const NON_BINANCE_FIXED_ANCHOR: Record<string, number> = {
@@ -136,14 +137,13 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   const resolveSyncCustomMeta = useCallback(
     (sym: MarketSymbol, fallbackPrice: number): CustomCoinTickInitFallback => {
       const match = getInitialAdminCoinsSync(true).find((c) => c.symbol === sym);
-      const rawBase = match?.basePrice;
       const anchor =
-        typeof rawBase === 'number' && Number.isFinite(rawBase) && rawBase > 0
-          ? rawBase
+        Number.isFinite(fallbackPrice) && fallbackPrice > 0
+          ? fallbackPrice
           : typeof match?.currentPrice === 'number' && Number.isFinite(match.currentPrice) && match.currentPrice > 0
           ? match.currentPrice
-          : Number.isFinite(fallbackPrice) && fallbackPrice > 0
-          ? fallbackPrice
+          : typeof match?.basePrice === 'number' && Number.isFinite(match.basePrice) && match.basePrice > 0
+          ? match.basePrice
           : 100;
       return {
         symbol: sym,
@@ -175,7 +175,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
       quote.price,
       Date.now(),
       meta.options,
-      BINANCE_HISTORY_LIMIT
+      CUSTOM_COIN_HISTORICAL_CANDLES
     );
   });
   const [dataSource, setDataSource] = useState<'live' | 'sim'>('live');
@@ -253,6 +253,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   const customMetaRef = useRef<CustomCoinTickInitFallback>(
     resolveSyncCustomMeta(quote.symbol, quote.price)
   );
+  const hydratedCustomKeyRef = useRef<string | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{
@@ -286,7 +287,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           tf,
           livePx,
           tickNow,
-          CUSTOM_COIN_TOTAL_CANDLES,
+          CUSTOM_COIN_MAX_CANDLES,
           meta
         ).candles
       );
@@ -380,47 +381,73 @@ export const MarketChart: React.FC<MarketChartProps> = ({
 
     const loadCustomCoinCandles = async () => {
       try {
-        const rows = await getCustomCoinKlinesStatic(quote.symbol, timeframe, CUSTOM_COIN_TOTAL_CANDLES);
+        const rows = await getCustomCoinKlinesStatic(
+          quote.symbol,
+          timeframe,
+          CUSTOM_COIN_HISTORICAL_CANDLES + 1
+        );
         if (controller.signal.aborted || rows.length === 0) return;
 
         const latestMeta = resolveSyncCustomMeta(quote.symbol, livePriceRef.current);
         customMetaRef.current = latestMeta;
+        const currentKey = `${quote.symbol}:${timeframe}`;
         const nowSnap = Date.now();
+        const remoteClose = rows[rows.length - 1].close;
+
         setCustomCandles((prev) => {
+          const liveCandidate =
+            Number.isFinite(livePriceRef.current) && livePriceRef.current > 0
+              ? livePriceRef.current
+              : remoteClose;
+
           if (prev.length === 0) {
+            hydratedCustomKeyRef.current = currentKey;
             return applyCustomCoinLiveTickToSeries(
               rows,
               timeframe,
-              livePriceRef.current,
+              remoteClose,
               nowSnap,
-              CUSTOM_COIN_TOTAL_CANDLES,
+              CUSTOM_COIN_MAX_CANDLES,
               latestMeta
             ).candles;
           }
-          const prevClosed = prev.length >= 2 ? prev[prev.length - 2] : prev[prev.length - 1];
-          const nextClosed = rows.length >= 2 ? rows[rows.length - 2] : rows[rows.length - 1];
-          const sameClosedAnchor =
-            Boolean(prevClosed && nextClosed) &&
-            normalizeCandleTimeMs(prevClosed.time) === normalizeCandleTimeMs(nextClosed.time) &&
-            Math.abs(nextClosed.close - prevClosed.close) <= Math.max(1e-7, prevClosed.close * 1e-5);
 
-          // If Admin did NOT change anchor/bias/volatility, preserve accumulated active candle ticks/wicks
-          if (sameClosedAnchor) {
+          if (hydratedCustomKeyRef.current !== currentKey) {
+            hydratedCustomKeyRef.current = currentKey;
+            const prevClose = prev[prev.length - 1].close;
+            const relDiff =
+              remoteClose > 0 ? Math.abs(prevClose - remoteClose) / remoteClose : 0;
+            if (relDiff > 0.015) {
+              const resolvedLive =
+                Math.abs(liveCandidate - remoteClose) / Math.max(0.0001, remoteClose) > 0.015
+                  ? remoteClose
+                  : liveCandidate;
+              return applyCustomCoinLiveTickToSeries(
+                rows,
+                timeframe,
+                resolvedLive,
+                nowSnap,
+                CUSTOM_COIN_MAX_CANDLES,
+                latestMeta
+              ).candles;
+            }
             return applyCustomCoinLiveTickToSeries(
               prev,
               timeframe,
-              livePriceRef.current,
+              liveCandidate,
               nowSnap,
-              CUSTOM_COIN_TOTAL_CANDLES,
+              CUSTOM_COIN_MAX_CANDLES,
               latestMeta
             ).candles;
           }
+
+          // Subsequent Firestore snapshots must NEVER overwrite rolled-over/frozen candles
           return applyCustomCoinLiveTickToSeries(
-            rows,
+            prev,
             timeframe,
-            livePriceRef.current,
+            liveCandidate,
             nowSnap,
-            CUSTOM_COIN_TOTAL_CANDLES,
+            CUSTOM_COIN_MAX_CANDLES,
             latestMeta
           ).candles;
         });
@@ -466,6 +493,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
 
     const loadCandles = async () => {
       if (quote.isCustom) {
+        hydratedCustomKeyRef.current = null;
         const syncMeta = resolveSyncCustomMeta(quote.symbol, livePriceRef.current);
         customMetaRef.current = syncMeta;
         setCustomCandles(
@@ -476,7 +504,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
             livePriceRef.current,
             Date.now(),
             syncMeta.options,
-            BINANCE_HISTORY_LIMIT
+            CUSTOM_COIN_HISTORICAL_CANDLES
           )
         );
         setDataSource('live');
@@ -565,7 +593,7 @@ export const MarketChart: React.FC<MarketChartProps> = ({
           timeframe,
           quote.price,
           Date.now(),
-          CUSTOM_COIN_TOTAL_CANDLES,
+          CUSTOM_COIN_MAX_CANDLES,
           meta
         ).candles
       );

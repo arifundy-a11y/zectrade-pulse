@@ -586,8 +586,93 @@ export interface CustomCoinTickInitFallback {
 }
 
 /**
- * Synchronously initializes 200 closed deterministic historical candles plus 1 live active
- * candle anchored to currentBucketMs so Custom Coins render immediately without async delay.
+ * Builds deterministic historical OHLCV candles ending right before currentBucketMs,
+ * working strictly BACKWARD from the Custom Coin's current live price (`currentPrice`)
+ * with realistic ±0.15% to ±0.8% seeded deterministic candle bodies and upper/lower wicks.
+ * Never anchors history to 1.0 or 0, eliminating any giant vertical spike.
+ */
+export function buildBackwardAnchoredCustomCandles(
+  symbol: MarketSymbol,
+  currentPrice: number,
+  timeframe: ChartTimeframe,
+  historicalCount = 150,
+  nowMs = Date.now(),
+  options?: ForwardCandleOptions
+): OhlcvCandle[] {
+  const safePrice = Number.isFinite(currentPrice) && currentPrice > 0 ? currentPrice : 100;
+  const safeCount = Math.max(2, Math.round(historicalCount));
+  const currentBucketMs = getCandleBucketStartMs(nowMs, timeframe);
+  const volMult =
+    options?.volatilityLevel === 'calm'
+      ? 0.65
+      : options?.volatilityLevel === 'active'
+      ? 1.25
+      : 1.0;
+
+  const closes = new Array<number>(safeCount);
+  const opens = new Array<number>(safeCount);
+  const times = new Array<number>(safeCount);
+
+  closes[safeCount - 1] = safePrice;
+  const symSeed = hashSymbolSeed(`${symbol}:${timeframe}`);
+  const symPhase = (symSeed % 9973) * 0.0023;
+  const biasNudge =
+    options?.trendBias === 'up' ? 0.0008 : options?.trendBias === 'down' ? -0.0008 : 0;
+
+  for (let i = safeCount - 1; i >= 0; i--) {
+    const bucketTimeMs = stepCandleBucketMs(currentBucketMs, timeframe, -(safeCount - i));
+    times[i] = bucketTimeMs;
+
+    const rng = mulberry32(hashSymbolSeed(`${symbol}:bw:${timeframe}:${bucketTimeMs}`));
+    const baseStepMag = (0.0015 + rng() * 0.0065) * volMult;
+    const clampedMag = Math.max(0.0015, Math.min(0.008, baseStepMag));
+
+    const wave =
+      Math.sin(i * 0.14 + symPhase) * 0.45 + Math.cos(i * 0.31 + symPhase * 1.7) * 0.35;
+    const meanRevPull = ((safePrice - closes[i]) / safePrice) * 0.18;
+    const signedRaw = wave * 0.5 + (rng() - 0.5) * 1.2 + meanRevPull + biasNudge;
+    const sign = signedRaw >= 0 ? 1 : -1;
+    const stepPct = sign * clampedMag;
+
+    const openVal = Math.max(0.0001, closes[i] / (1 + stepPct));
+    opens[i] = openVal;
+    if (i > 0) {
+      closes[i - 1] = openVal;
+    }
+  }
+
+  const volBase = safePrice > 10000 ? 38 : safePrice > 1000 ? 220 : 1450;
+  const candles: OhlcvCandle[] = new Array(safeCount);
+  for (let i = 0; i < safeCount; i++) {
+    const open = opens[i];
+    const close = closes[i];
+    const bucketTimeMs = times[i];
+    const rng = mulberry32(hashSymbolSeed(`${symbol}:wick:${timeframe}:${bucketTimeMs}`));
+    const body = Math.abs(close - open);
+    const wickBase = Math.max(close * 0.0014 * volMult, body * 0.38);
+    const upperWick = wickBase * (0.35 + rng() * 1.15);
+    const lowerWick = wickBase * (0.35 + rng() * 1.15);
+    const high = Math.max(open, close) + upperWick;
+    const low = Math.max(0.0001, Math.min(open, close) - lowerWick);
+    const volume = Number(
+      (volBase * (0.55 + (body / Math.max(0.0001, high - low)) * 0.9 + rng() * 0.9)).toFixed(2)
+    );
+    candles[i] = {
+      time: bucketTimeMs,
+      open,
+      high,
+      low,
+      close,
+      volume,
+    };
+  }
+
+  return candles;
+}
+
+/**
+ * Synchronously initializes 150 backward-anchored deterministic historical candles (tied to livePrice)
+ * plus 1 active live candle anchored to currentBucketMs so Custom Coins never show a giant vertical jump.
  */
 export function initializeCustomCoinCandlesSeries(
   symbol: MarketSymbol,
@@ -596,31 +681,34 @@ export function initializeCustomCoinCandlesSeries(
   livePrice: number,
   nowMs = Date.now(),
   options?: ForwardCandleOptions,
-  closedCount = 200
+  closedCount = 150
 ): OhlcvCandle[] {
-  const safeAnchor = Number.isFinite(anchorPrice) && anchorPrice > 0 ? anchorPrice : 100;
+  const safeLive =
+    Number.isFinite(livePrice) && livePrice > 0
+      ? livePrice
+      : Number.isFinite(anchorPrice) && anchorPrice > 0
+      ? anchorPrice
+      : 100;
   const safeClosedCount = Math.max(2, Math.round(closedCount));
   const currentBucketMs = getCandleBucketStartMs(nowMs, timeframe);
-  const prevBucketMs = stepCandleBucketMs(currentBucketMs, timeframe, -1);
 
-  const historicalBars = generateForwardDeterministicCandles(
+  const historicalBars = buildBackwardAnchoredCustomCandles(
     symbol,
-    safeAnchor,
+    safeLive,
     timeframe,
     safeClosedCount,
-    prevBucketMs,
+    nowMs,
     options
   );
 
-  const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? safeAnchor;
-  const liveClose = Number.isFinite(livePrice) && livePrice > 0 ? livePrice : liveOpen;
+  const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? safeLive;
   const activeCandle: OhlcvCandle = {
     time: currentBucketMs,
     open: liveOpen,
-    high: Math.max(liveOpen, liveClose),
-    low: Math.min(liveOpen, liveClose),
-    close: liveClose,
-    volume: Number((Math.max(12, Math.abs(liveClose - liveOpen) * 65 + 18)).toFixed(2)),
+    high: Math.max(liveOpen, safeLive),
+    low: Math.min(liveOpen, safeLive),
+    close: safeLive,
+    volume: 15,
   };
 
   return [...historicalBars, activeCandle];
@@ -636,7 +724,7 @@ export function rollOverCustomCoinCandles(
   candles: OhlcvCandle[],
   timeframe: ChartTimeframe,
   nowMs: number,
-  maxCandles = 201
+  maxCandles = 300
 ): { candles: OhlcvCandle[]; rolledCount: number } {
   if (!Array.isArray(candles) || candles.length === 0) {
     return { candles: Array.isArray(candles) ? candles : [], rolledCount: 0 };
@@ -675,7 +763,7 @@ export function rollOverCustomCoinCandles(
       high: prevClose,
       low: prevClose,
       close: prevClose,
-      volume: 0,
+      volume: 15,
     });
     cursorBucket = targetTime;
     rolledCount += 1;
@@ -688,7 +776,7 @@ export function rollOverCustomCoinCandles(
       high: prevClose,
       low: prevClose,
       close: prevClose,
-      volume: 0,
+      volume: 15,
     });
     rolledCount += 1;
   }
@@ -701,10 +789,10 @@ export function rollOverCustomCoinCandles(
 
 /**
  * Performs 1-second candle rollover + active-candle live price tick update for Custom Coins:
- * - Auto-initializes 200 closed + 1 active candle immediately if prev series is empty
+ * - Auto-initializes 150 backward-anchored closed + 1 active candle immediately if prev series is empty
  * - Normalizes timestamps strictly to milliseconds
  * - Freezes closed candles permanently (`time < currentBucket`)
- * - Spawns new candle(s) on UTC interval boundary (`open = high = low = close = prev.close`)
+ * - Spawns new candle(s) on UTC interval boundary (`open = high = low = close = prev.close, volume = 15`)
  * - Updates ONLY the active rightmost candle's close, high, low, and volume
  */
 export function applyCustomCoinLiveTickToSeries(
@@ -712,20 +800,21 @@ export function applyCustomCoinLiveTickToSeries(
   timeframe: ChartTimeframe,
   livePrice: number,
   nowMs: number,
-  maxCandles = 201,
+  maxCandles = 300,
   initFallback?: CustomCoinTickInitFallback
 ): { candles: OhlcvCandle[]; rolledCount: number } {
   if ((!Array.isArray(candles) || candles.length === 0) && initFallback) {
-    const closedCount = Math.max(2, maxCandles - 1);
+    const safePrice =
+      Number.isFinite(livePrice) && livePrice > 0 ? livePrice : initFallback.anchorPrice;
     return {
       candles: initializeCustomCoinCandlesSeries(
         initFallback.symbol,
-        initFallback.anchorPrice,
+        safePrice,
         timeframe,
-        livePrice,
+        safePrice,
         nowMs,
         initFallback.options,
-        closedCount
+        150
       ),
       rolledCount: 0,
     };

@@ -8,6 +8,7 @@ import {
   MAX_CHART_RIGHT_OFFSET,
   aggregateCandlesByTimeframe,
   applyCustomCoinLiveTickToSeries,
+  buildBackwardAnchoredCustomCandles,
   buildBinanceOrderBook,
   computeBollingerBands,
   computeCandleCutOffCountdown,
@@ -442,19 +443,55 @@ test('normalizeCandleTimeMs converts seconds < 1e12 to ms and auto-initializes e
   assert.equal(rolledFromSec.candles[2].time, (tSec + 60) * 1000);
   assert.equal(rolledFromSec.candles[2].open, 62.95);
 
-  // Empty prev array with initFallback synchronously yields 200 historical + 1 active = 201 candles
+  // Empty prev array with initFallback synchronously yields 150 historical + 1 active = 151 candles
   const nowBucket = getCandleBucketStartMs(1763140200000, '1m');
   const initialized = initializeCustomCoinCandlesSeries('XUUSDT', 63.1, '1m', 63.25, nowBucket + 12_000);
-  assert.equal(initialized.length, 201);
-  assert.equal(initialized[200].time, nowBucket);
-  assert.equal(initialized[200].close, 63.25);
+  assert.equal(initialized.length, 151);
+  assert.equal(initialized[149].close, 63.25);
+  assert.equal(initialized[150].time, nowBucket);
+  assert.equal(initialized[150].close, 63.25);
+  assert.equal(initialized[150].volume, 15);
 
-  const autoTicked = applyCustomCoinLiveTickToSeries([], '1m', 63.4, nowBucket + 18_000, 201, {
+  const autoTicked = applyCustomCoinLiveTickToSeries([], '1m', 63.4, nowBucket + 18_000, 300, {
     symbol: 'XUUSDT',
     anchorPrice: 63.1,
     options: { trendBias: 'up', volatilityLevel: 'normal' },
   });
-  assert.equal(autoTicked.candles.length, 201);
-  assert.equal(autoTicked.candles[200].time, nowBucket);
-  assert.equal(autoTicked.candles[200].close, 63.4);
+  assert.equal(autoTicked.candles.length, 151);
+  assert.equal(autoTicked.candles[149].close, 63.4);
+  assert.equal(autoTicked.candles[150].time, nowBucket);
+  assert.equal(autoTicked.candles[150].close, 63.4);
+  assert.equal(autoTicked.candles[150].volume, 15);
+});
+
+test('buildBackwardAnchoredCustomCandles anchors 150 bars strictly to livePrice with zero giant spike across all 8 timeframes', () => {
+  const live = 80.26;
+  const nowMs = 1763140900000;
+  const timeframes: ChartTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1mo'];
+
+  for (const tf of timeframes) {
+    const barsA = buildBackwardAnchoredCustomCandles('XUUSDT', live, tf, 150, nowMs);
+    const barsB = buildBackwardAnchoredCustomCandles('XUUSDT', live, tf, 150, nowMs);
+    assert.equal(barsA.length, 150);
+    assert.deepEqual(barsA, barsB);
+    assert.equal(barsA[barsA.length - 1].close, live);
+    assert.equal(hasFlatCandles(barsA), false);
+
+    let minLow = Infinity;
+    let maxHigh = -Infinity;
+    for (let i = 0; i < barsA.length; i++) {
+      const c = barsA[i];
+      if (c.low < minLow) minLow = c.low;
+      if (c.high > maxHigh) maxHigh = c.high;
+      assert.ok(c.high > Math.max(c.open, c.close), `expected upper wick on ${tf} bar ${i}`);
+      assert.ok(c.low < Math.min(c.open, c.close), `expected lower wick on ${tf} bar ${i}`);
+      const bodyPct = Math.abs(c.close - c.open) / Math.min(c.open, c.close);
+      assert.ok(bodyPct >= 0.001 && bodyPct <= 0.012, `expected realistic body % on ${tf} bar ${i}, got ${bodyPct}`);
+      if (i > 0) {
+        assert.equal(c.open, barsA[i - 1].close);
+      }
+    }
+    // Zero giant spike: minLow..maxHigh envelope stays realistic near $80.26 (ratio < 1.25)
+    assert.ok(maxHigh / minLow < 1.25, `expected no giant vertical spike on ${tf}, got ratio ${maxHigh / minLow}`);
+  }
 });

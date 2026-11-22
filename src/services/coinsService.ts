@@ -22,10 +22,9 @@ import {
   type ChartTimeframe,
   HISTORICAL_WAVE_CANDLES,
   type OhlcvCandle,
-  generateForwardDeterministicCandles,
+  buildBackwardAnchoredCustomCandles,
   getCandleBucketStartMs,
   hasFlatCandles,
-  stepCandleBucketMs,
 } from '../utils/chartEngine';
 import {
   computeOrganicMarketTickPrice,
@@ -525,16 +524,14 @@ export function writeCachedChartCandlesStatic(
 }
 
 /**
- * Generates deterministic, immutable UTC-aligned OHLCV klines purely forward from the
- * authoritative coin (`basePrice`, `schedule`, `symbol`) and fixed UTC candle timestamps:
- * - Closed historical candles strictly depend only on their fixed UTC bucket timestamp and
- *   never shift when the live price moves or when a new candle opens.
- * - Adjacent candles share exact continuity (`candle[i].open === candle[i - 1].close`).
+ * Builds deterministic OHLCV klines anchored directly backward from the Custom Coin's
+ * current live price (`liveCoin.currentPrice`) with realistic ±0.15% to ±0.8% bodies and wicks
+ * so switching pairs or timeframes never renders a giant vertical tail candle.
  */
 export async function getCustomCoinKlinesStatic(
   rawSymbol: string,
   timeframe: ChartTimeframe,
-  limit = HISTORICAL_WAVE_CANDLES
+  limit = 151
 ): Promise<OhlcvCandle[]> {
   purgeStaleFlatCandleCaches();
   const { symbol } = normalizeSymbolParts(rawSymbol);
@@ -547,30 +544,33 @@ export async function getCustomCoinKlinesStatic(
   const liveCoin = evaluateCoinTick(target, utcSecMs, false).coin;
   const safeLimit = Math.min(500, Math.max(HISTORICAL_WAVE_CANDLES, Math.round(limit)));
   const currentBucketStart = getCandleBucketStartMs(utcSecMs, timeframe);
-  const prevBucketStart = stepCandleBucketMs(currentBucketStart, timeframe, -1);
 
   const forwardOptions = {
     trendBias: target.schedule?.trendBias ?? 'neutral',
     volatilityLevel: target.schedule?.volatilityLevel ?? 'normal',
   } as const;
 
-  const anchorBasePrice =
-    typeof target.basePrice === 'number' && Number.isFinite(target.basePrice) && target.basePrice > 0
+  const currentLivePrice =
+    typeof liveCoin.currentPrice === 'number' &&
+    Number.isFinite(liveCoin.currentPrice) &&
+    liveCoin.currentPrice > 0
+      ? liveCoin.currentPrice
+      : typeof target.basePrice === 'number' && Number.isFinite(target.basePrice) && target.basePrice > 0
       ? target.basePrice
-      : target.currentPrice;
+      : 100;
 
-  const historicalBars = generateForwardDeterministicCandles(
+  const historicalBars = buildBackwardAnchoredCustomCandles(
     symbol,
-    anchorBasePrice,
+    currentLivePrice,
     timeframe,
     safeLimit - 1,
-    prevBucketStart,
+    utcSecMs,
     forwardOptions
   );
 
   // Sample deterministic intra-bucket ticks from currentBucketStart to utcSecMs for accurate live wicks
-  const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? anchorBasePrice;
-  const liveClose = liveCoin.currentPrice;
+  const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? currentLivePrice;
+  const liveClose = currentLivePrice;
   let liveHigh = Math.max(liveOpen, liveClose);
   let liveLow = Math.min(liveOpen, liveClose);
 
@@ -590,7 +590,7 @@ export async function getCustomCoinKlinesStatic(
   const movePct = liveOpen > 0 ? Math.abs(liveClose - liveOpen) / liveOpen : 0;
   const rangePct = liveOpen > 0 ? (liveHigh - liveLow) / liveOpen : 0;
   const elapsedMinutes = Math.max(0.02, elapsedMs / 60_000);
-  const volBase = anchorBasePrice > 10000 ? 18 : anchorBasePrice > 1000 ? 110 : 680;
+  const volBase = currentLivePrice > 10000 ? 18 : currentLivePrice > 1000 ? 110 : 680;
   const liveCandle: OhlcvCandle = {
     time: currentBucketStart,
     open: liveOpen,
@@ -598,7 +598,7 @@ export async function getCustomCoinKlinesStatic(
     low: liveLow,
     close: liveClose,
     volume: Number(
-      (volBase * Math.min(4, Math.sqrt(elapsedMinutes)) * (0.2 + (movePct + rangePct) * 180)).toFixed(2)
+      Math.max(15, volBase * Math.min(4, Math.sqrt(elapsedMinutes)) * (0.2 + (movePct + rangePct) * 180)).toFixed(2)
     ),
   };
 
