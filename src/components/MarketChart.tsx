@@ -23,9 +23,7 @@ import type { MarketQuote, MarketSymbol } from '../types';
 import {
   getCustomCoinKlinesStatic,
   purgeStaleFlatCandleCaches,
-  readCachedChartCandlesStatic,
   subscribeToCustomCoinsStatic,
-  writeCachedChartCandlesStatic,
 } from '../services/coinsService';
 import {
   type ChartTimeframe,
@@ -49,12 +47,12 @@ import {
   computeVwap,
   formatChartPrice,
   formatChartTimestamp,
-  generateRealisticCandles,
+  generateForwardDeterministicCandles,
   generateRecentTrades,
   getBinanceKlineInterval,
   getBinanceKlineSymbol,
   getTickOptionsForPrice,
-  hasFlatCandles,
+  stepCandleBucketMs,
 } from '../utils/chartEngine';
 
 interface MarketChartProps {
@@ -66,10 +64,13 @@ interface MarketChartProps {
 }
 
 const TIMEFRAMES: ChartTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1mo'];
-const TOTAL_CANDLES = 360;
-const BINANCE_HISTORY_LIMIT = 500;
+const TOTAL_CANDLES = 200;
+const BINANCE_HISTORY_LIMIT = 200;
 const DEFAULT_VISIBLE_CANDLES = 48;
 const MIN_VISIBLE_CANDLES = 18;
+const NON_BINANCE_FIXED_ANCHOR: Record<string, number> = {
+  USOIL: 71.85,
+};
 
 type ChartStyleMode = 'candles' | 'hollow' | 'area';
 type DrawToolMode = 'none' | 'hline' | 'measure';
@@ -98,60 +99,76 @@ export const MarketChart: React.FC<MarketChartProps> = ({
   const pairPickerRef = useRef<HTMLDivElement | null>(null);
 
   const targetCandleCount = Math.max(HISTORICAL_WAVE_CANDLES, TOTAL_CANDLES);
-  const buildFreshWaveCandles = useCallback(
-    (sym: MarketSymbol, price: number, tf: ChartTimeframe): OhlcvCandle[] => {
-      const generated = generateRealisticCandles(
+  const buildForwardSeries = useCallback(
+    (sym: MarketSymbol, fallbackPrice: number, tf: ChartTimeframe, livePrice: number): OhlcvCandle[] => {
+      const anchor = NON_BINANCE_FIXED_ANCHOR[sym] ?? fallbackPrice;
+      const currentBucketStart = getCandleBucketStartMs(Date.now(), tf);
+      const prevBucketStart = stepCandleBucketMs(currentBucketStart, tf, -1);
+      const historicalBars = generateForwardDeterministicCandles(
         sym,
-        price,
+        anchor,
         tf,
-        targetCandleCount,
-        getCandleBucketStartMs(Date.now(), tf)
+        targetCandleCount - 1,
+        prevBucketStart
       );
-      writeCachedChartCandlesStatic(sym, tf, generated);
-      return generated;
+      const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? anchor;
+      const liveClose = Number.isFinite(livePrice) && livePrice > 0 ? livePrice : liveOpen;
+      const pad = Math.max(liveClose * 0.0006, 0.0001);
+      const liveCandle: OhlcvCandle = {
+        time: currentBucketStart,
+        open: liveOpen,
+        high: Math.max(liveOpen, liveClose) + pad * 0.4,
+        low: Math.max(0.0001, Math.min(liveOpen, liveClose) - pad * 0.4),
+        close: liveClose,
+        volume: Number((Math.max(18, Math.abs(liveClose - liveOpen) * 65 + 24)).toFixed(2)),
+      };
+      return [...historicalBars, liveCandle];
     },
     [targetCandleCount]
   );
 
-  const syncTailToLivePrice = useCallback((series: OhlcvCandle[], livePrice: number): OhlcvCandle[] => {
-    if (!Array.isArray(series) || series.length === 0 || !Number.isFinite(livePrice) || livePrice <= 0) {
-      return series;
-    }
-    const next = [...series];
-    const last = { ...next[next.length - 1] };
-    last.close = livePrice;
-    last.high = Math.max(last.high, livePrice);
-    last.low = Math.min(last.low, livePrice);
-    next[next.length - 1] = last;
-    return next;
-  }, []);
+  const syncTailToLivePrice = useCallback(
+    (series: OhlcvCandle[], livePrice: number, tf: ChartTimeframe): OhlcvCandle[] => {
+      if (!Array.isArray(series) || series.length === 0 || !Number.isFinite(livePrice) || livePrice <= 0) {
+        return series;
+      }
+      const next = [...series];
+      const last = next[next.length - 1];
+      const currentBucketMs = getCandleBucketStartMs(Date.now(), tf);
+      const lastBucketMs = getCandleBucketStartMs(last.time, tf);
+
+      if (currentBucketMs > lastBucketMs) {
+        const open = last.close;
+        const stepCandle: OhlcvCandle = {
+          time: currentBucketMs,
+          open,
+          high: Math.max(open, livePrice),
+          low: Math.min(open, livePrice),
+          close: livePrice,
+          volume: Number((Math.max(12, Math.abs(livePrice - open) * 65 + 6)).toFixed(2)),
+        };
+        return [...next.slice(-(BINANCE_HISTORY_LIMIT - 1)), stepCandle];
+      }
+
+      next[next.length - 1] = {
+        ...last,
+        close: livePrice,
+        high: Math.max(last.high, livePrice),
+        low: Math.min(last.low, livePrice),
+      };
+      return next;
+    },
+    []
+  );
 
   const [candles, setCandles] = useState<OhlcvCandle[]>(() => {
     purgeStaleFlatCandleCaches();
-    const cached = readCachedChartCandlesStatic(quote.symbol, '15m');
-    if (cached && cached.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(cached)) {
-      return cached.map((bar, idx) =>
-        idx === cached.length - 1 && quote.price > 0
-          ? {
-              ...bar,
-              close: quote.price,
-              high: Math.max(bar.high, quote.price),
-              low: Math.min(bar.low, quote.price),
-            }
-          : bar
-      );
+    if (!quote.isCustom && !getBinanceKlineSymbol(quote.symbol)) {
+      return buildForwardSeries(quote.symbol, quote.price, '15m', quote.price);
     }
-    const generated = generateRealisticCandles(
-      quote.symbol,
-      quote.price,
-      '15m',
-      Math.max(HISTORICAL_WAVE_CANDLES, TOTAL_CANDLES),
-      getCandleBucketStartMs(Date.now(), '15m')
-    );
-    writeCachedChartCandlesStatic(quote.symbol, '15m', generated);
-    return generated;
+    return [];
   });
-  const [dataSource, setDataSource] = useState<'live' | 'sim'>('sim');
+  const [dataSource, setDataSource] = useState<'live' | 'sim'>('live');
 
   // Zoom, Pan & Crosshair states (default 14 empty candle widths between live candle and Y-axis)
   const [visibleCount, setVisibleCount] = useState<number>(DEFAULT_VISIBLE_CANDLES);
@@ -310,7 +327,8 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     purgeStaleFlatCandleCaches();
   }, []);
 
-  // Load historical klines from Firestore custom_coins (for custom/official coins) or Binance REST API (for BTC/ETH/SOL)
+  // Load authentic Binance OHLCV klines (official coins), Firestore deterministic history (custom coins),
+  // or deterministic forward history (commodities like USOIL).
   useEffect(() => {
     const controller = new AbortController();
     const binanceSym = getBinanceKlineSymbol(quote.symbol);
@@ -318,30 +336,53 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     let syncTimer: ReturnType<typeof setInterval> | null = null;
     let unsubCustomCoins: (() => void) | null = null;
 
-    const loadCustomCoinCandles = async (isInitialLoad: boolean) => {
-      if (isInitialLoad) {
-        const cached = readCachedChartCandlesStatic(quote.symbol, timeframe);
-        if (cached && cached.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(cached)) {
-          setCandles(syncTailToLivePrice(cached, livePriceRef.current));
-        } else {
-          setCandles(buildFreshWaveCandles(quote.symbol, livePriceRef.current, timeframe));
-        }
+    const loadCustomCoinCandles = async (clearFirst: boolean) => {
+      if (clearFirst) {
+        setCandles([]);
         setDataSource('live');
       }
       try {
-        const rows = await getCustomCoinKlinesStatic(quote.symbol, timeframe, targetCandleCount);
+        const rows = await getCustomCoinKlinesStatic(quote.symbol, timeframe, BINANCE_HISTORY_LIMIT);
         if (!controller.signal.aborted && rows.length > 0) {
-          if (rows.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(rows)) {
-            setCandles(syncTailToLivePrice(rows, livePriceRef.current));
-            writeCachedChartCandlesStatic(quote.symbol, timeframe, rows);
-          } else {
-            const anchorClose = rows[rows.length - 1]?.close || livePriceRef.current;
-            setCandles(buildFreshWaveCandles(quote.symbol, anchorClose, timeframe));
-          }
+          setCandles(syncTailToLivePrice(rows, livePriceRef.current, timeframe));
           setDataSource('live');
         }
       } catch {
-        // Keep current wave series on transient errors
+        // Retain current custom coin candles on transient errors
+      }
+    };
+
+    const fetchBinanceKlinesFromUrl = async (baseUrl: string): Promise<OhlcvCandle[] | null> => {
+      try {
+        const res = await fetch(
+          `${baseUrl}/api/v3/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${BINANCE_HISTORY_LIMIT}`,
+          { signal: controller.signal }
+        );
+        if (!res.ok) return null;
+        const rows = (await res.json()) as Array<
+          [number, string, string, string, string, string, ...unknown[]]
+        >;
+        if (!Array.isArray(rows) || rows.length === 0) return null;
+        const parsed: OhlcvCandle[] = rows
+          .map((r) => ({
+            time: Number(r[0]),
+            open: parseFloat(r[1]),
+            high: parseFloat(r[2]),
+            low: parseFloat(r[3]),
+            close: parseFloat(r[4]),
+            volume: parseFloat(r[5]),
+          }))
+          .filter(
+            (bar) =>
+              Number.isFinite(bar.time) &&
+              Number.isFinite(bar.open) &&
+              Number.isFinite(bar.high) &&
+              Number.isFinite(bar.low) &&
+              Number.isFinite(bar.close)
+          );
+        return parsed.length > 0 ? parsed : null;
+      } catch {
+        return null;
       }
     };
 
@@ -359,64 +400,40 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         return;
       }
 
-      const cached = readCachedChartCandlesStatic(quote.symbol, timeframe);
-      if (cached && cached.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(cached)) {
-        setCandles(syncTailToLivePrice(cached, livePriceRef.current));
-      } else {
-        setCandles(buildFreshWaveCandles(quote.symbol, livePriceRef.current, timeframe));
+      if (!binanceSym) {
+        // Non-Binance built-in commodity pair (e.g. USOIL) uses immutable forward UTC candles
+        setCandles(buildForwardSeries(quote.symbol, livePriceRef.current, timeframe, livePriceRef.current));
+        setDataSource('sim');
+        return;
       }
-      setDataSource('sim');
 
-      if (!binanceSym) return;
+      // Official Binance coins: never inject fake/random history; fetch authentic exchange klines directly
+      setCandles([]);
+      setDataSource('live');
 
-      try {
-        const res = await fetch(
-          `https://api.binance.com/api/v3/klines?symbol=${binanceSym}&interval=${binanceInterval}&limit=${BINANCE_HISTORY_LIMIT}`,
-          { signal: controller.signal }
-        );
-        if (!res.ok) return;
-        const rows = (await res.json()) as Array<
-          [number, string, string, string, string, string, ...unknown[]]
-        >;
-        if (!Array.isArray(rows) || rows.length === 0) return;
-        const parsed: OhlcvCandle[] = rows.map((r) => ({
-          time: Number(r[0]),
-          open: parseFloat(r[1]),
-          high: parseFloat(r[2]),
-          low: parseFloat(r[3]),
-          close: parseFloat(r[4]),
-          volume: parseFloat(r[5]),
-        }));
-        if (!controller.signal.aborted && parsed.length > 0) {
-          if (parsed.length >= HISTORICAL_WAVE_CANDLES && !hasFlatCandles(parsed)) {
-            const synced = syncTailToLivePrice(parsed, livePriceRef.current);
-            setCandles(synced);
-            writeCachedChartCandlesStatic(quote.symbol, timeframe, synced);
-          } else {
-            const anchorClose = parsed[parsed.length - 1]?.close || livePriceRef.current;
-            setCandles(buildFreshWaveCandles(quote.symbol, anchorClose, timeframe));
-          }
-          setDataSource('live');
-        }
-      } catch {
-        // Keep wave-generated series anchored cleanly around livePrice
+      const parsed =
+        (await fetchBinanceKlinesFromUrl('https://api.binance.com')) ??
+        (await fetchBinanceKlinesFromUrl('https://data-api.binance.vision'));
+
+      if (!controller.signal.aborted && parsed && parsed.length > 0) {
+        setCandles(parsed);
+        setDataSource('live');
       }
     };
 
-    loadCandles();
+    void loadCandles();
     return () => {
       controller.abort();
       if (unsubCustomCoins) unsubCustomCoins();
       if (syncTimer) clearInterval(syncTimer);
     };
-  }, [quote.symbol, quote.isCustom, timeframe, targetCandleCount, buildFreshWaveCandles, syncTailToLivePrice]);
+  }, [quote.symbol, quote.isCustom, timeframe, buildForwardSeries, syncTailToLivePrice]);
 
-  // Sync active candle with live ticks and roll strictly on exchange-standard UTC timeframe boundaries
+  // Stream live price ONLY into the latest active candle (closed historical bars remain 100% locked)
   useEffect(() => {
+    if (!Number.isFinite(quote.price) || quote.price <= 0) return;
     setCandles((prev) => {
-      if (prev.length === 0 || hasFlatCandles(prev)) {
-        return buildFreshWaveCandles(quote.symbol, quote.price, timeframe);
-      }
+      if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
       const now = Date.now();
       const currentBucketMs = getCandleBucketStartMs(now, timeframe);
@@ -425,12 +442,11 @@ export const MarketChart: React.FC<MarketChartProps> = ({
       if (currentBucketMs > lastBucketMs) {
         const open = last.close;
         const close = quote.price;
-        const wickPad = Math.max(close * 0.0004, Math.abs(close - open) * 0.25);
         const stepCandle: OhlcvCandle = {
           time: currentBucketMs,
           open,
-          high: Math.max(open, close) + wickPad * 0.5,
-          low: Math.max(0.0001, Math.min(open, close) - wickPad * 0.5),
+          high: Math.max(open, close),
+          low: Math.min(open, close),
           close,
           volume: Number((Math.max(12, Math.abs(close - open) * 65 + 6)).toFixed(2)),
         };
@@ -440,14 +456,15 @@ export const MarketChart: React.FC<MarketChartProps> = ({
       if (last.close === quote.price) return prev;
 
       const next = [...prev];
-      const updated = { ...last };
-      updated.close = quote.price;
-      updated.high = Math.max(updated.high, quote.price);
-      updated.low = Math.min(updated.low, quote.price);
-      next[next.length - 1] = updated;
+      next[next.length - 1] = {
+        ...last,
+        close: quote.price,
+        high: Math.max(last.high, quote.price),
+        low: Math.min(last.low, quote.price),
+      };
       return next;
     });
-  }, [quote.price, quote.symbol, quote.isCustom, timeframe, buildFreshWaveCandles]);
+  }, [quote.price, quote.symbol, quote.isCustom, timeframe]);
 
   // Full-series technical indicators computed once on all candles
   const ma7All = useMemo(() => computeMovingAverage(candles, 7), [candles]);
@@ -1651,6 +1668,17 @@ export const MarketChart: React.FC<MarketChartProps> = ({
                 >
                   &gt;&gt;
                 </button>
+              )}
+
+              {candles.length === 0 && (
+                <div
+                  data-testid="chart-loading-overlay"
+                  className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center"
+                >
+                  <div className="px-3 py-1.5 rounded-lg bg-[#161A1E]/90 border border-[#2B3139] text-[11px] font-mono text-slate-300 shadow-lg">
+                    Loading {quote.label} {timeframe} candles...
+                  </div>
+                </div>
               )}
 
               {/* Main SVG Candlestick & Indicator Canvas */}

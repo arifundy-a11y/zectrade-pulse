@@ -243,14 +243,14 @@ export function checkOrderDirectionConflict(
     return { allowed: true, conflictType: 'none', existingSide: null, reason: null };
   }
 
+  const duplicateMessage = `You already have an active position or pending order on ${cleanSym}. Close or cancel it first.`;
+
   if (existing.side !== side) {
-    const existingLabel = existing.side === 'buy' ? 'Buy / Long' : 'Sell / Short';
-    const newLabel = side === 'buy' ? 'Buy / Long' : 'Sell / Short';
     return {
       allowed: false,
       conflictType: 'opposite_side',
       existingSide: existing.side,
-      reason: `Cannot trade both Buy and Sell on ${cleanSym}. Close or cancel your active ${existingLabel} before opening ${newLabel}.`,
+      reason: duplicateMessage,
     };
   }
 
@@ -258,7 +258,7 @@ export function checkOrderDirectionConflict(
     allowed: false,
     conflictType: 'same_side',
     existingSide: existing.side,
-    reason: `An active ${existing.side === 'buy' ? 'Long' : 'Short'} position or pre-order already exists for ${cleanSym}.`,
+    reason: duplicateMessage,
   };
 }
 

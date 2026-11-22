@@ -53,6 +53,8 @@ import {
   deduplicateFirestoreAgainstSql,
 } from './utils/depositHistory';
 import {
+  formatFriendlyAuthError,
+  isAuthCancellationError,
   parseAuthActionLocation,
   ZECTRADE_ACTION_CODE_SETTINGS,
   type ParsedAuthActionRoute,
@@ -327,9 +329,18 @@ export default function App() {
   const [coinAnalyticsLoading, setCoinAnalyticsLoading] = useState(false);
   const closingIdsRef = useRef<Set<string>>(new Set());
   const settledIdsRef = useRef<Set<string>>(new Set());
+  const triggeredPreOrderIdsRef = useRef<Set<string>>(new Set());
+  const isSubmittingOrderRef = useRef(false);
+  const orderCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingWalletDeltasRef = useRef(0);
   const seenSqlTransferIdsRef = useRef<Set<string>>(new Set());
   const initialWalletSyncDoneRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      if (orderCooldownTimerRef.current) clearTimeout(orderCooldownTimerRef.current);
+    };
+  }, []);
 
   // Modal States
   const [swapModalState, setSwapModalState] = useState<{
@@ -705,10 +716,10 @@ export default function App() {
           }
         })
         .catch((err: unknown) => {
-          const code = (err as { code?: string } | null)?.code;
-          if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+          if (isAuthCancellationError(err)) {
             return;
           }
+          showToast(formatFriendlyAuthError(err, 'Google Sign-In failed.'), 'error');
         });
     }
 
@@ -1282,9 +1293,11 @@ export default function App() {
     } = stateRef.current;
 
     for (const order of currentOrders) {
+      if (triggeredPreOrderIdsRef.current.has(order.id)) continue;
       const q = currentQuotes.find((item) => item.symbol === order.symbol);
       if (!q) continue;
       if (shouldTriggerPreOrder(order, q.price)) {
+        triggeredPreOrderIdsRef.current.add(order.id);
         setPreOrders((prev) => prev.filter((o) => o.id !== order.id));
         const filledPos: Position = { ...order, markPrice: q.price };
         setActivePositions((prev) => [...prev, filledPos]);
@@ -2209,6 +2222,7 @@ export default function App() {
   const handleEnterDemoWorkspace = () => {
     closingIdsRef.current.clear();
     settledIdsRef.current.clear();
+    triggeredPreOrderIdsRef.current.clear();
     seenSqlTransferIdsRef.current.clear();
     initialWalletSyncDoneRef.current = false;
     pendingWalletDeltasRef.current = 0;
@@ -2228,13 +2242,11 @@ export default function App() {
       await signInWithPopup(oauthAuth, googleAuthProvider);
       showToast('Signed in with Google.');
     } catch (err: unknown) {
-      const fbErr = err as { code?: string; message?: string } | null;
-      const code = fbErr?.code ?? '';
-
-      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      if (isAuthCancellationError(err)) {
         return;
       }
 
+      const code = (err as { code?: string } | null)?.code ?? '';
       if (
         code === 'auth/popup-blocked' ||
         code === 'auth/operation-not-supported-in-this-environment'
@@ -2243,18 +2255,15 @@ export default function App() {
           await signInWithRedirect(oauthAuth, googleAuthProvider);
           return;
         } catch (redirectErr: unknown) {
-          const rCode = (redirectErr as { code?: string } | null)?.code;
-          if (rCode === 'auth/popup-closed-by-user' || rCode === 'auth/cancelled-popup-request') {
+          if (isAuthCancellationError(redirectErr)) {
             return;
           }
-          const rMsg = redirectErr instanceof Error ? redirectErr.message : 'Google Sign-In failed.';
-          showToast(rMsg, 'error');
+          showToast(formatFriendlyAuthError(redirectErr, 'Google Sign-In failed.'), 'error');
           return;
         }
       }
 
-      const msg = fbErr?.message || 'Google Sign-In failed.';
-      showToast(msg, 'error');
+      showToast(formatFriendlyAuthError(err, 'Google Sign-In failed.'), 'error');
     }
   };
 
@@ -2387,18 +2396,7 @@ export default function App() {
         showToast('Signed in successfully.');
       }
     } catch (err: unknown) {
-      const fbErr = err as { code?: string; message?: string };
-      let msg = fbErr?.message || 'Authentication error';
-      if (fbErr?.code === 'auth/user-not-found' || fbErr?.code === 'auth/invalid-credential') {
-        msg = 'Account does not exist or incorrect password.';
-      } else if (fbErr?.code === 'auth/wrong-password') {
-        msg = 'Incorrect password. Please try again or click Forgot Password.';
-      } else if (fbErr?.code === 'auth/email-already-in-use') {
-        msg = 'This email is already registered. Please sign in instead.';
-      } else if (fbErr?.code === 'auth/invalid-email') {
-        msg = 'Please enter a valid email address.';
-      }
-      showToast(msg, 'error');
+      showToast(formatFriendlyAuthError(err, 'Authentication failed. Please try again.'), 'error');
     }
   };
 
@@ -2411,126 +2409,140 @@ export default function App() {
     stopLoss: number | null;
     takeProfit: number | null;
   }): Promise<boolean> => {
-    if (user.isBlocked) {
-      showToast('Your account is currently restricted. Please contact support.', 'error');
+    if (isSubmittingOrderRef.current) {
       return false;
     }
-    const quote = quotes.find((q) => q.symbol === payload.symbol) ?? quotes[0];
-    if (!Number.isFinite(payload.margin) || payload.margin <= 0) {
-      showToast('Enter a valid margin amount greater than $0.', 'error');
-      return false;
-    }
+    isSubmittingOrderRef.current = true;
 
-    const preview = calculatePositionPreview({
-      margin: payload.margin,
-      leverage: payload.leverage,
-      side: payload.side,
-      marketPrice: quote.price,
-      customEntryPrice: payload.customEntryPrice,
-    });
+    try {
+      if (user.isBlocked) {
+        showToast('Your account is currently restricted. Please contact support.', 'error');
+        return false;
+      }
+      const quote = quotes.find((q) => q.symbol === payload.symbol) ?? quotes[0];
+      if (!Number.isFinite(payload.margin) || payload.margin <= 0) {
+        showToast('Enter a valid margin amount greater than $0.', 'error');
+        return false;
+      }
 
-    const avail = accountMode === 'demo' ? user.demoBalance : user.realBalance;
-    if (preview.totalRequired > avail) {
-      showToast(`Insufficient ${accountMode.toUpperCase()} balance (Need $${preview.totalRequired.toFixed(2)}).`, 'error');
-      return false;
-    }
+      const preview = calculatePositionPreview({
+        margin: payload.margin,
+        leverage: payload.leverage,
+        side: payload.side,
+        marketPrice: quote.price,
+        customEntryPrice: payload.customEntryPrice,
+      });
 
-    const conflict = checkOrderDirectionConflict(
-      payload.symbol,
-      payload.side,
-      accountMode,
-      activePositions,
-      preOrders
-    );
-    if (!conflict.allowed) {
-      showToast(conflict.reason || `Cannot open conflicting order on ${payload.symbol}.`, 'error');
-      return false;
-    }
+      const avail = accountMode === 'demo' ? user.demoBalance : user.realBalance;
+      if (preview.totalRequired > avail) {
+        showToast(`Insufficient ${accountMode.toUpperCase()} balance (Need $${preview.totalRequired.toFixed(2)}).`, 'error');
+        return false;
+      }
 
-    const slTpCheck = validateSlTpTargets(
-      payload.side,
-      preview.effectiveEntryPrice,
-      payload.stopLoss,
-      payload.takeProfit
-    );
-    if (!slTpCheck.valid) {
-      showToast(slTpCheck.reason || 'Invalid Stop Loss or Take Profit price.', 'error');
-      return false;
-    }
+      const conflict = checkOrderDirectionConflict(
+        payload.symbol,
+        payload.side,
+        accountMode,
+        activePositions,
+        preOrders
+      );
+      if (!conflict.allowed) {
+        showToast(conflict.reason || `You already have an active position or pending order on ${payload.symbol}. Close or cancel it first.`, 'error');
+        return false;
+      }
 
-    const nextDemo = accountMode === 'demo' ? user.demoBalance - preview.totalRequired : user.demoBalance;
-    const nextReal = accountMode === 'real' ? user.realBalance - preview.totalRequired : user.realBalance;
-    const tradedReal = accountMode === 'real';
+      const slTpCheck = validateSlTpTargets(
+        payload.side,
+        preview.effectiveEntryPrice,
+        payload.stopLoss,
+        payload.takeProfit
+      );
+      if (!slTpCheck.valid) {
+        showToast(slTpCheck.reason || 'Invalid Stop Loss or Take Profit price.', 'error');
+        return false;
+      }
 
-    setUser((prev) => ({
-      ...prev,
-      demoBalance: nextDemo,
-      realBalance: nextReal,
-      hasTradedAfterDeposit: tradedReal ? true : prev.hasTradedAfterDeposit,
-    }));
+      const nextDemo = accountMode === 'demo' ? user.demoBalance - preview.totalRequired : user.demoBalance;
+      const nextReal = accountMode === 'real' ? user.realBalance - preview.totalRequired : user.realBalance;
+      const tradedReal = accountMode === 'real';
 
-    const orderId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const orderData: PreOrder = {
-      id: orderId,
-      symbol: payload.symbol,
-      side: payload.side,
-      leverage: payload.leverage,
-      entryPrice: preview.effectiveEntryPrice,
-      markPrice: quote.price,
-      liqPrice: preview.liqPriceFormatted,
-      margin: payload.margin,
-      btcQty: preview.qty,
-      totalValue: preview.totalValue,
-      tradingFeePaid: preview.tradeFee,
-      fundingFeePaid: 0,
-      stopLoss: payload.stopLoss,
-      takeProfit: payload.takeProfit,
-      openedAt: Date.now(),
-      accountMode,
-    };
+      setUser((prev) => ({
+        ...prev,
+        demoBalance: nextDemo,
+        realBalance: nextReal,
+        hasTradedAfterDeposit: tradedReal ? true : prev.hasTradedAfterDeposit,
+      }));
 
-    if (preview.isLimitOrder) {
-      setPreOrders((prev) => [...prev, orderData]);
-      showToast(`Limit Pre-Order queued for ${payload.symbol} at $${preview.effectiveEntryPrice.toFixed(2)}.`);
-    } else {
-      setActivePositions((prev) => [...prev, orderData]);
-      recordTradeOnServer({
-        tradeUid: orderId,
+      const orderId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const orderData: PreOrder = {
+        id: orderId,
         symbol: payload.symbol,
         side: payload.side,
         leverage: payload.leverage,
-        margin: payload.margin,
         entryPrice: preview.effectiveEntryPrice,
-        liqPrice: getNumericLiqPrice(orderData),
-        tradingFee: preview.tradeFee,
-        pnlVal: 0,
-        status: 'OPEN',
+        markPrice: quote.price,
+        liqPrice: preview.liqPriceFormatted,
+        margin: payload.margin,
+        btcQty: preview.qty,
+        totalValue: preview.totalValue,
+        tradingFeePaid: preview.tradeFee,
+        fundingFeePaid: 0,
+        stopLoss: payload.stopLoss,
+        takeProfit: payload.takeProfit,
+        openedAt: Date.now(),
         accountMode,
-      });
-      showToast(`Opened ${payload.side.toUpperCase()} ${payload.symbol} (${payload.leverage}x).`);
-    }
+      };
 
-    if (!user.isLocalDemoSession) {
-      applyWalletDeltaOnServer(accountMode, -preview.totalRequired, tradedReal);
-    }
-
-    if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
-      try {
-        const uid = auth.currentUser.uid;
-        await updateDoc(doc(db, 'users', uid), {
-          [accountMode === 'demo' ? 'demoBalance' : 'realBalance']: accountMode === 'demo' ? nextDemo : nextReal,
-          ...(tradedReal ? { hasTradedAfterDeposit: true } : {}),
+      if (preview.isLimitOrder) {
+        setPreOrders((prev) => [...prev, orderData]);
+        showToast(`Limit Pre-Order queued for ${payload.symbol} at $${preview.effectiveEntryPrice.toFixed(2)}.`);
+      } else {
+        setActivePositions((prev) => [...prev, orderData]);
+        recordTradeOnServer({
+          tradeUid: orderId,
+          symbol: payload.symbol,
+          side: payload.side,
+          leverage: payload.leverage,
+          margin: payload.margin,
+          entryPrice: preview.effectiveEntryPrice,
+          liqPrice: getNumericLiqPrice(orderData),
+          tradingFee: preview.tradeFee,
+          pnlVal: 0,
+          status: 'OPEN',
+          accountMode,
         });
-        await setDoc(
-          doc(db, 'users', uid, preview.isLimitOrder ? 'orders' : 'positions', orderId),
-          orderData
-        );
-      } catch {
-        // ignore offline fallback
+        showToast(`Opened ${payload.side.toUpperCase()} ${payload.symbol} (${payload.leverage}x).`);
       }
-    }
 
-    return true;
+      if (!user.isLocalDemoSession) {
+        applyWalletDeltaOnServer(accountMode, -preview.totalRequired, tradedReal);
+      }
+
+      if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
+        try {
+          const uid = auth.currentUser.uid;
+          await updateDoc(doc(db, 'users', uid), {
+            [accountMode === 'demo' ? 'demoBalance' : 'realBalance']: accountMode === 'demo' ? nextDemo : nextReal,
+            ...(tradedReal ? { hasTradedAfterDeposit: true } : {}),
+          });
+          await setDoc(
+            doc(db, 'users', uid, preview.isLimitOrder ? 'orders' : 'positions', orderId),
+            orderData
+          );
+        } catch {
+          // ignore offline fallback
+        }
+      }
+
+      return true;
+    } finally {
+      if (orderCooldownTimerRef.current) {
+        clearTimeout(orderCooldownTimerRef.current);
+      }
+      orderCooldownTimerRef.current = setTimeout(() => {
+        isSubmittingOrderRef.current = false;
+      }, 1500);
+    }
   };
 
   const handleUpdatePositionSlTp = useCallback(

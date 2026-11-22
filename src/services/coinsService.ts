@@ -22,9 +22,10 @@ import {
   type ChartTimeframe,
   HISTORICAL_WAVE_CANDLES,
   type OhlcvCandle,
-  generateRealisticCandles,
+  generateForwardDeterministicCandles,
   getCandleBucketStartMs,
   hasFlatCandles,
+  stepCandleBucketMs,
 } from '../utils/chartEngine';
 import {
   computeOrganicMarketTickPrice,
@@ -524,11 +525,11 @@ export function writeCachedChartCandlesStatic(
 }
 
 /**
- * Generates deterministic UTC-aligned OHLCV klines purely from the authoritative Firestore
- * coin (`basePrice`, `schedule`, `symbol`) and shared UTC candle timestamps:
- * - Always generates at least 120 wave-patterned historical candles backwards from the
- *   current live price using multi-frequency sine/cosine waves + seeded bodies & wicks.
- * - Never emits flat historical bars and guarantees 100% cross-device chart sync.
+ * Generates deterministic, immutable UTC-aligned OHLCV klines purely forward from the
+ * authoritative coin (`basePrice`, `schedule`, `symbol`) and fixed UTC candle timestamps:
+ * - Closed historical candles strictly depend only on their fixed UTC bucket timestamp and
+ *   never shift when the live price moves or when a new candle opens.
+ * - Adjacent candles share exact continuity (`candle[i].open === candle[i - 1].close`).
  */
 export async function getCustomCoinKlinesStatic(
   rawSymbol: string,
@@ -546,23 +547,29 @@ export async function getCustomCoinKlinesStatic(
   const liveCoin = evaluateCoinTick(target, utcSecMs, false).coin;
   const safeLimit = Math.min(500, Math.max(HISTORICAL_WAVE_CANDLES, Math.round(limit)));
   const currentBucketStart = getCandleBucketStartMs(utcSecMs, timeframe);
+  const prevBucketStart = stepCandleBucketMs(currentBucketStart, timeframe, -1);
 
-  const prevBucketEval = evaluateCoinTick(target, currentBucketStart - 1000, false).coin;
-  const histAnchorPrice =
-    Number.isFinite(prevBucketEval.currentPrice) && prevBucketEval.currentPrice > 0
-      ? prevBucketEval.currentPrice
-      : liveCoin.currentPrice;
+  const forwardOptions = {
+    trendBias: target.schedule?.trendBias ?? 'neutral',
+    volatilityLevel: target.schedule?.volatilityLevel ?? 'normal',
+  } as const;
 
-  const historicalBars = generateRealisticCandles(
+  const anchorBasePrice =
+    typeof target.basePrice === 'number' && Number.isFinite(target.basePrice) && target.basePrice > 0
+      ? target.basePrice
+      : target.currentPrice;
+
+  const historicalBars = generateForwardDeterministicCandles(
     symbol,
-    histAnchorPrice,
+    anchorBasePrice,
     timeframe,
     safeLimit - 1,
-    currentBucketStart - 1
+    prevBucketStart,
+    forwardOptions
   );
 
-  // Sample deterministic intra-bucket ticks from currentBucketStart to utcSecMs for realistic live wicks
-  const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? histAnchorPrice;
+  // Sample deterministic intra-bucket ticks from currentBucketStart to utcSecMs for live wicks
+  const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? anchorBasePrice;
   const liveClose = liveCoin.currentPrice;
   let liveHigh = Math.max(liveOpen, liveClose);
   let liveLow = Math.min(liveOpen, liveClose);
@@ -577,7 +584,7 @@ export async function getCustomCoinKlinesStatic(
     }
   }
 
-  const spreadFloor = liveClose * 0.0008;
+  const spreadFloor = Math.max(liveClose * 0.0008, 0.000001);
   if (liveHigh - liveLow < spreadFloor) {
     liveHigh = Math.max(liveHigh, Math.max(liveOpen, liveClose) + spreadFloor * 0.5);
     liveLow = Math.max(0.0001, Math.min(liveLow, Math.min(liveOpen, liveClose) - spreadFloor * 0.5));
@@ -592,17 +599,7 @@ export async function getCustomCoinKlinesStatic(
     volume: Number((Math.max(18, Math.abs(liveClose - liveOpen) * 65 + 24)).toFixed(2)),
   };
 
-  let series = [...historicalBars, liveCandle];
-  if (hasFlatCandles(series)) {
-    series = generateRealisticCandles(
-      symbol,
-      liveClose,
-      timeframe,
-      safeLimit,
-      currentBucketStart
-    );
-  }
-
+  const series = [...historicalBars, liveCandle];
   writeCachedChartCandlesStatic(symbol, timeframe, series);
   return series;
 }

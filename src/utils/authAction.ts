@@ -14,6 +14,86 @@ export interface ParsedAuthActionRoute {
   continueUrl: string | null;
 }
 
+const CANCELLED_AUTH_CODES = new Set([
+  'auth/popup-closed-by-user',
+  'auth/cancelled-popup-request',
+  'auth/user-cancelled',
+]);
+
+export function isAuthCancellationError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const fbErr = err as { code?: unknown; message?: unknown };
+  const code = typeof fbErr.code === 'string' ? fbErr.code.trim() : '';
+  if (CANCELLED_AUTH_CODES.has(code)) {
+    return true;
+  }
+  const msg = typeof fbErr.message === 'string' ? fbErr.message : '';
+  if (!msg) return false;
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('auth/user-cancelled') ||
+    lower.includes('popup-closed-by-user') ||
+    lower.includes('cancelled-popup-request') ||
+    lower.includes('idp denied access')
+  );
+}
+
+export function formatFriendlyAuthError(
+  err: unknown,
+  fallback = 'Authentication failed. Please try again.'
+): string {
+  const fbErr = (err && typeof err === 'object' ? err : {}) as {
+    code?: unknown;
+    message?: unknown;
+  };
+  const code = typeof fbErr.code === 'string' ? fbErr.code.trim() : '';
+
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Invalid email or password.';
+    case 'auth/email-already-in-use':
+      return 'This email is already registered.';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/weak-password':
+      return 'Password must be at least 6 characters.';
+    case 'auth/network-request-failed':
+      return 'Network error. Please try again.';
+    case 'auth/too-many-requests':
+      return 'Too many attempts. Please wait a moment and try again.';
+    case 'auth/user-disabled':
+      return 'This account has been disabled.';
+    case 'auth/popup-blocked':
+      return 'Sign-in popup was blocked by your browser. Please allow popups and try again.';
+    case 'auth/account-exists-with-different-credential':
+      return 'An account already exists with this email using another sign-in method.';
+    default:
+      break;
+  }
+
+  const rawMessage =
+    typeof fbErr.message === 'string'
+      ? fbErr.message
+      : err instanceof Error
+      ? err.message
+      : '';
+
+  if (!rawMessage.trim()) return fallback;
+
+  const cleaned = rawMessage
+    .replace(/^Firebase:\s*/i, '')
+    .replace(/\s*\(auth\/[^)]+\)\.?/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  if (!cleaned || /^error\.?$/i.test(cleaned)) {
+    return fallback;
+  }
+  return cleaned;
+}
+
 function normalizeActionMode(rawMode: string | null): AuthActionMode {
   const clean = (rawMode || '').trim();
   if (clean === 'resetPassword') return 'resetPassword';

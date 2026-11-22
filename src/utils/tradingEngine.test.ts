@@ -588,16 +588,28 @@ test('checkOrderDirectionConflict disallows simultaneous Buy and Sell on the sam
   assert.equal(oppSell.allowed, false);
   assert.equal(oppSell.conflictType, 'opposite_side');
   assert.equal(oppSell.existingSide, 'buy');
+  assert.equal(
+    oppSell.reason,
+    'You already have an active position or pending order on XUUSDT. Close or cancel it first.'
+  );
 
   // Same side duplicate on same coin is also blocked
   const dupBuy = checkOrderDirectionConflict('XUUSDT', 'buy', 'real', activePositions, preOrders);
   assert.equal(dupBuy.allowed, false);
   assert.equal(dupBuy.conflictType, 'same_side');
+  assert.equal(
+    dupBuy.reason,
+    'You already have an active position or pending order on XUUSDT. Close or cancel it first.'
+  );
 
   // Opposite side against pending pre-order is blocked
   const oppBuyEth = checkOrderDirectionConflict('ETHUSDT', 'buy', 'real', activePositions, preOrders);
   assert.equal(oppBuyEth.allowed, false);
   assert.equal(oppBuyEth.conflictType, 'opposite_side');
+  assert.equal(
+    oppBuyEth.reason,
+    'You already have an active position or pending order on ETHUSDT. Close or cancel it first.'
+  );
 
   // Different coin or different account mode is allowed
   const btcBuy = checkOrderDirectionConflict('BTCUSDT', 'buy', 'real', activePositions, preOrders);

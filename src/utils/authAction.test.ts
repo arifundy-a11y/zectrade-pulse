@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ZECTRADE_ACTION_CODE_SETTINGS,
+  formatFriendlyAuthError,
   isAuthActionPathname,
+  isAuthCancellationError,
   mapFirebaseActionError,
   parseAuthActionLocation,
   validateNewPasswordPair,
@@ -78,5 +80,59 @@ test('mapFirebaseActionError returns readable guidance for Firebase auth codes',
   assert.match(
     mapFirebaseActionError({ code: 'auth/weak-password' }, 'resetPassword'),
     /at least 6 characters/i
+  );
+});
+
+test('isAuthCancellationError identifies cancelled Google popup/redirect errors across codes and messages', () => {
+  assert.equal(isAuthCancellationError({ code: 'auth/popup-closed-by-user' }), true);
+  assert.equal(isAuthCancellationError({ code: 'auth/cancelled-popup-request' }), true);
+  assert.equal(isAuthCancellationError({ code: 'auth/user-cancelled' }), true);
+  assert.equal(
+    isAuthCancellationError({
+      message: 'Firebase: Error (auth/user-cancelled).',
+    }),
+    true
+  );
+  assert.equal(
+    isAuthCancellationError({
+      message: 'Firebase: IdP denied access (auth/user-cancelled).',
+    }),
+    true
+  );
+  assert.equal(
+    isAuthCancellationError({
+      message: 'popup-closed-by-user happened',
+    }),
+    true
+  );
+  assert.equal(
+    isAuthCancellationError({ code: 'auth/network-request-failed', message: 'Network error' }),
+    false
+  );
+});
+
+test('formatFriendlyAuthError strips raw Firebase prefixes and auth codes and maps known errors', () => {
+  assert.equal(
+    formatFriendlyAuthError({ code: 'auth/invalid-credential', message: 'Firebase: Error (auth/invalid-credential).' }),
+    'Invalid email or password.'
+  );
+  assert.equal(
+    formatFriendlyAuthError({ code: 'auth/email-already-in-use' }),
+    'This email is already registered.'
+  );
+  assert.equal(
+    formatFriendlyAuthError({ code: 'auth/network-request-failed' }),
+    'Network error. Please try again.'
+  );
+  assert.equal(
+    formatFriendlyAuthError({
+      code: 'auth/internal-error',
+      message: 'Firebase: Something unexpected happened while connecting (auth/internal-error).',
+    }),
+    'Something unexpected happened while connecting'
+  );
+  assert.equal(
+    formatFriendlyAuthError({ message: 'Firebase: Error (auth/unknown).' }, 'Google Sign-In failed.'),
+    'Google Sign-In failed.'
   );
 });

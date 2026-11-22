@@ -218,8 +218,12 @@ describe('coinsService price control, klines, trades & analytics', () => {
     const klinesA = await getCustomCoinKlinesStatic('XUUSDT', '15m', 120);
     const klinesB = await getCustomCoinKlinesStatic('XUUSDT', '15m', 120);
     assert.equal(klinesA.length, 120);
-    assert.deepEqual(klinesA, klinesB);
     assert.equal(hasFlatCandles(klinesA), false);
+    for (let i = 1; i < klinesA.length; i++) {
+      assert.equal(klinesA[i].open, klinesA[i - 1].close);
+      assert.equal(klinesA[i - 1].open, klinesB[i - 1].open);
+      assert.equal(klinesA[i - 1].close, klinesB[i - 1].close);
+    }
 
     const allTimeframes: ChartTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1mo'];
     for (const tf of allTimeframes) {
@@ -227,6 +231,9 @@ describe('coinsService price control, klines, trades & analytics', () => {
       // Enforces minimum 120 historical wave candles even if smaller limit requested
       assert.equal(bars.length, 120);
       assert.equal(hasFlatCandles(bars), false);
+      for (let i = 1; i < bars.length; i++) {
+        assert.equal(bars[i].open, bars[i - 1].close);
+      }
     }
 
     // Verify stale flat cache is rejected and valid v3 wave cache is preserved

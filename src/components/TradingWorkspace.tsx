@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Edit3, ArrowDownRight, ArrowUpRight, Bell, Check, Lock, RotateCcw, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import type {
   AccountMode,
@@ -85,7 +85,17 @@ export const TradingWorkspace: React.FC<TradingWorkspaceProps> = ({
   const [takeProfitInput, setTakeProfitInput] = useState('');
   const [leverage, setLeverage] = useState(10);
   const [pendingSide, setPendingSide] = useState<OrderSide>('buy');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
+  const isSubmittingOrderRef = useRef(false);
+  const orderCooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (orderCooldownTimerRef.current) {
+        clearTimeout(orderCooldownTimerRef.current);
+      }
+    };
+  }, []);
 
   const [editingSlTpPosId, setEditingSlTpPosId] = useState<string | null>(null);
   const [editSlInput, setEditSlInput] = useState('');
@@ -185,9 +195,10 @@ export const TradingWorkspace: React.FC<TradingWorkspaceProps> = ({
   };
 
   const executeOrder = async (side: OrderSide) => {
+    if (isSubmittingOrderRef.current) return;
+    isSubmittingOrderRef.current = true;
+    setIsSubmittingOrder(true);
     setPendingSide(side);
-    if (isSubmitting) return;
-    setIsSubmitting(true);
     try {
       const ok = await onPlaceOrder({
         symbol: selectedSymbol,
@@ -206,7 +217,14 @@ export const TradingWorkspace: React.FC<TradingWorkspaceProps> = ({
         setExchangeTab(preview.isLimitOrder ? 'orders' : 'positions');
       }
     } finally {
-      setIsSubmitting(false);
+      if (orderCooldownTimerRef.current) {
+        clearTimeout(orderCooldownTimerRef.current);
+      }
+      orderCooldownTimerRef.current = setTimeout(() => {
+        isSubmittingOrderRef.current = false;
+        setIsSubmittingOrder(false);
+        orderCooldownTimerRef.current = null;
+      }, 1500);
     }
   };
 
@@ -584,9 +602,9 @@ export const TradingWorkspace: React.FC<TradingWorkspaceProps> = ({
             >
               <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" aria-hidden="true" />
               <span>
-                {buyConflict.existingSide === 'buy'
-                  ? `Active Buy / Long on ${selectedSymbol}. Close or cancel your Long position before trading Sell / Short.`
-                  : `Active Sell / Short on ${selectedSymbol}. Close or cancel your Short position before trading Buy / Long.`}
+                {buyConflict.reason ||
+                  sellConflict.reason ||
+                  `You already have an active position or pending order on ${selectedSymbol}. Close or cancel it first.`}
               </span>
             </div>
           )}
@@ -595,13 +613,16 @@ export const TradingWorkspace: React.FC<TradingWorkspaceProps> = ({
           <div className="grid grid-cols-2 gap-2 sm:gap-2.5">
             <button
               type="button"
-              disabled={isSubmitting || !buyConflict.allowed}
+              data-testid="order-buy-btn"
+              disabled={isSubmittingOrder || !buyConflict.allowed}
               onClick={() => executeOrder('buy')}
               className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-bold py-2 sm:py-2.5 min-h-[38px] sm:min-h-[42px] rounded-lg text-xs flex items-center justify-center gap-1 transition-colors"
             >
               <ArrowUpRight className="w-3.5 h-3.5" aria-hidden="true" />
               <span>
-                {!buyConflict.allowed
+                {isSubmittingOrder
+                  ? 'Processing...'
+                  : !buyConflict.allowed
                   ? buyConflict.conflictType === 'opposite_side'
                     ? 'Close Short to Buy'
                     : 'Long Active'
@@ -610,13 +631,16 @@ export const TradingWorkspace: React.FC<TradingWorkspaceProps> = ({
             </button>
             <button
               type="button"
-              disabled={isSubmitting || !sellConflict.allowed}
+              data-testid="order-sell-btn"
+              disabled={isSubmittingOrder || !sellConflict.allowed}
               onClick={() => executeOrder('sell')}
               className="w-full bg-red-600 hover:bg-red-500 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-bold py-2 sm:py-2.5 min-h-[38px] sm:min-h-[42px] rounded-lg text-xs flex items-center justify-center gap-1 transition-colors"
             >
               <ArrowDownRight className="w-3.5 h-3.5" aria-hidden="true" />
               <span>
-                {!sellConflict.allowed
+                {isSubmittingOrder
+                  ? 'Processing...'
+                  : !sellConflict.allowed
                   ? sellConflict.conflictType === 'opposite_side'
                     ? 'Close Long to Sell'
                     : 'Short Active'

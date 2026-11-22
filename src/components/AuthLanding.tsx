@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ChevronDown, Eye, EyeOff, ArrowUpRight, ArrowDownLeft, Trophy, ShieldCheck, Layers, Info, AlertTriangle } from 'lucide-react';
+import { ChevronDown, Eye, EyeOff, ArrowUpRight, ArrowDownLeft, Trophy, ShieldCheck, Layers, Info, AlertTriangle, Loader2 } from 'lucide-react';
 import type { FaqEntry, LiveFeedItem, MarketQuote, PlatformStats } from '../types';
 import { normalizePlatformStats } from '../utils/platformStats';
 import { AnimatedStatNumber } from './AnimatedStatNumber';
@@ -52,8 +52,19 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
   });
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
   const [openFaqIdx, setOpenFaqIdx] = useState<number | null>(0);
   const resolvedStats = normalizePlatformStats(platformStats);
+
+  const handleGoogleClick = async () => {
+    if (googleBusy || submitting) return;
+    setGoogleBusy(true);
+    try {
+      await onGoogleSignIn();
+    } finally {
+      setGoogleBusy(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -315,10 +326,19 @@ export const AuthLanding: React.FC<AuthLandingProps> = ({
           {(authMode === 'register' || authMode === 'login') && (
             <button
               type="button"
-              onClick={onGoogleSignIn}
-              className="w-full py-2 min-h-[40px] rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold text-xs transition-colors"
+              disabled={googleBusy || submitting}
+              data-testid="google-signin-btn"
+              onClick={handleGoogleClick}
+              className="w-full py-2 min-h-[40px] rounded-lg bg-slate-950 hover:bg-slate-800 disabled:opacity-60 border border-slate-700 text-slate-200 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
             >
-              Continue with Google
+              {googleBusy ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" aria-hidden="true" />
+                  <span>Connecting to Google...</span>
+                </>
+              ) : (
+                <span>Continue with Google</span>
+              )}
             </button>
           )}
 

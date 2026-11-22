@@ -21,12 +21,15 @@ import {
   computeVwap,
   formatChartPrice,
   formatChartTimestamp,
+  generateForwardDeterministicCandles,
   generateRealisticCandles,
   generateRecentTrades,
   getBinanceKlineInterval,
   getBinanceKlineSymbol,
+  getCandleBucketStartMs,
   getTickOptionsForPrice,
   hasFlatCandles,
+  stepCandleBucketMs,
 } from './chartEngine';
 
 test('generateRealisticCandles anchors closing price smoothly to livePrice without price cliffs', () => {
@@ -291,6 +294,45 @@ test('computePannableChartViewport keeps 14-candle default right offset and allo
   assert.equal(oldest.startIdx, 0);
   assert.equal(oldest.endIdx, 48);
 });
+
+test('generateForwardDeterministicCandles creates immutable zero-gap UTC candles across advancing buckets', () => {
+  const baseBucket = getCandleBucketStartMs(1763140000000, '15m');
+  const nextBucket = stepCandleBucketMs(baseBucket, '15m', 1);
+
+  const seriesA = generateForwardDeterministicCandles('XUUSDT', 100, '15m', 120, baseBucket, {
+    trendBias: 'up',
+    volatilityLevel: 'normal',
+  });
+  const seriesB = generateForwardDeterministicCandles('XUUSDT', 100, '15m', 120, nextBucket, {
+    trendBias: 'up',
+    volatilityLevel: 'normal',
+  });
+
+  assert.equal(seriesA.length, 120);
+  assert.equal(seriesB.length, 120);
+  assert.equal(hasFlatCandles(seriesA), false);
+
+  // Zero-gap check: every candle open equals the previous candle close
+  for (let i = 1; i < seriesA.length; i++) {
+    assert.equal(seriesA[i].open, seriesA[i - 1].close);
+    assert.ok(seriesA[i].high >= Math.max(seriesA[i].open, seriesA[i].close));
+    assert.ok(seriesA[i].low <= Math.min(seriesA[i].open, seriesA[i].close));
+  }
+
+  // Immutability check: overlapping closed historical timestamps remain 100% identical
+  // when time advances to the next candle bucket
+  for (let i = 1; i < seriesA.length; i++) {
+    assert.deepEqual(seriesB[i - 1], seriesA[i]);
+  }
+
+  // Monthly interval support & continuity
+  const monthly = generateForwardDeterministicCandles('USOIL', 71.85, '1mo', 48, getCandleBucketStartMs(1763140000000, '1mo'));
+  assert.equal(monthly.length, 48);
+  for (let i = 1; i < monthly.length; i++) {
+    assert.equal(monthly[i].open, monthly[i - 1].close);
+  }
+});
+
 
 
 

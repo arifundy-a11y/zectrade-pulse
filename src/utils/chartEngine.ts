@@ -207,6 +207,190 @@ export function getCandleBucketStartMs(timeMs: number, timeframe: ChartTimeframe
   return Math.floor(timeMs / stepMs) * stepMs;
 }
 
+export function stepCandleBucketMs(
+  bucketStartMs: number,
+  timeframe: ChartTimeframe,
+  deltaBuckets: number
+): number {
+  if (timeframe === '1mo') {
+    const d = new Date(bucketStartMs);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + deltaBuckets, 1, 0, 0, 0, 0);
+  }
+  return bucketStartMs + deltaBuckets * TIMEFRAME_MS[timeframe];
+}
+
+function getBucketOrdinalIndex(bucketStartMs: number, timeframe: ChartTimeframe): number {
+  if (timeframe === '1mo') {
+    const d = new Date(bucketStartMs);
+    return d.getUTCFullYear() * 12 + d.getUTCMonth();
+  }
+  return Math.floor(bucketStartMs / TIMEFRAME_MS[timeframe]);
+}
+
+function getTimeframeStepVolatility(timeframe: ChartTimeframe): number {
+  switch (timeframe) {
+    case '1m':
+      return 0.0022;
+    case '5m':
+      return 0.0038;
+    case '15m':
+      return 0.0058;
+    case '1h':
+      return 0.0088;
+    case '4h':
+      return 0.0145;
+    case '1d':
+      return 0.022;
+    case '1w':
+      return 0.042;
+    case '1mo':
+      return 0.072;
+  }
+}
+
+export interface ForwardCandleOptions {
+  trendBias?: 'up' | 'down' | 'neutral';
+  volatilityLevel?: 'calm' | 'normal' | 'active';
+}
+
+function evaluateRawBucketBoundaryPrice(
+  seedOffset: number,
+  anchorPrice: number,
+  bucketOrdinal: number,
+  timeframe: ChartTimeframe,
+  options?: ForwardCandleOptions
+): number {
+  const stepVol = getTimeframeStepVolatility(timeframe);
+  const volMult =
+    options?.volatilityLevel === 'calm'
+      ? 0.55
+      : options?.volatilityLevel === 'active'
+      ? 1.55
+      : 1.0;
+
+  const macro = Math.sin(bucketOrdinal * 0.078 + seedOffset * 0.13) * (stepVol * 4.8);
+  const swing = Math.cos(bucketOrdinal * 0.193 + seedOffset * 0.29) * (stepVol * 2.6);
+  const harmonic = Math.sin(bucketOrdinal * 0.431 + seedOffset * 0.57) * (stepVol * 1.45);
+  const jitter = (seededUnit(bucketOrdinal * 1.73 + seedOffset * 0.41) - 0.5) * (stepVol * 1.65);
+
+  const biasDrift =
+    options?.trendBias === 'up'
+      ? stepVol * 1.8 + Math.sin(bucketOrdinal * 0.024) * (stepVol * 1.2)
+      : options?.trendBias === 'down'
+      ? -(stepVol * 1.8 + Math.sin(bucketOrdinal * 0.024) * (stepVol * 1.2))
+      : 0;
+
+  const totalLogOffset = (macro + swing + harmonic + jitter) * volMult + biasDrift;
+  return Math.max(0.0001, anchorPrice * Math.exp(totalLogOffset));
+}
+
+function evaluateLockedBucketClosePrice(
+  seedOffset: number,
+  anchorPrice: number,
+  bucketOrdinal: number,
+  timeframe: ChartTimeframe,
+  options?: ForwardCandleOptions
+): number {
+  const rawCurr = evaluateRawBucketBoundaryPrice(
+    seedOffset,
+    anchorPrice,
+    bucketOrdinal,
+    timeframe,
+    options
+  );
+  const rawPrev = evaluateRawBucketBoundaryPrice(
+    seedOffset,
+    anchorPrice,
+    bucketOrdinal - 1,
+    timeframe,
+    options
+  );
+  const minDelta = rawPrev * Math.max(0.0005, getTimeframeStepVolatility(timeframe) * 0.16);
+  if (Math.abs(rawCurr - rawPrev) < minDelta) {
+    const dir = (bucketOrdinal & 1) === 0 ? 1 : -1;
+    return Math.max(0.0001, rawPrev + dir * minDelta * 1.35);
+  }
+  return rawCurr;
+}
+
+/**
+ * Generates immutable, zero-gap candlesticks strictly forward from fixed UTC bucket timestamps,
+ * timeframe interval, symbol seed, and Admin-configured anchor parameters (NEVER backwards from livePrice
+ * and NEVER using Math.random()). Every closed bucket stays 100% locked across reloads and devices.
+ */
+export function generateForwardDeterministicCandles(
+  symbol: MarketSymbol,
+  anchorPrice: number,
+  timeframe: ChartTimeframe,
+  count = HISTORICAL_WAVE_CANDLES,
+  endTimeMs = Date.now(),
+  options?: ForwardCandleOptions
+): OhlcvCandle[] {
+  const safeCount = Math.max(2, Math.round(count));
+  const safeAnchor = Number.isFinite(anchorPrice) && anchorPrice > 0 ? anchorPrice : 100;
+  const stepVol = getTimeframeStepVolatility(timeframe);
+  const volMult =
+    options?.volatilityLevel === 'calm'
+      ? 0.55
+      : options?.volatilityLevel === 'active'
+      ? 1.55
+      : 1.0;
+
+  const seedOffset = symbol
+    .split('')
+    .reduce((acc, ch, idx) => acc + ch.charCodeAt(0) * (idx + 17), 0);
+
+  const alignedEndMs = getCandleBucketStartMs(endTimeMs, timeframe);
+  const volBase = safeAnchor > 10000 ? 38 : safeAnchor > 1000 ? 220 : 1450;
+
+  const candles: OhlcvCandle[] = [];
+  for (let i = 0; i < safeCount; i++) {
+    const deltaFromEnd = i - (safeCount - 1);
+    const bucketTimeMs = stepCandleBucketMs(alignedEndMs, timeframe, deltaFromEnd);
+    const bucketOrdinal = getBucketOrdinalIndex(bucketTimeMs, timeframe);
+
+    const open = evaluateLockedBucketClosePrice(
+      seedOffset,
+      safeAnchor,
+      bucketOrdinal - 1,
+      timeframe,
+      options
+    );
+    const close = evaluateLockedBucketClosePrice(
+      seedOffset,
+      safeAnchor,
+      bucketOrdinal,
+      timeframe,
+      options
+    );
+
+    const bodyMove = Math.abs(close - open);
+    const baseSpread = Math.max(close * stepVol * 0.48 * volMult, bodyMove * 0.36);
+    const upperWick = baseSpread * (0.28 + seededUnit(bucketOrdinal * 5.13 + seedOffset * 0.19) * 1.15);
+    const lowerWick = baseSpread * (0.28 + seededUnit(bucketOrdinal * 7.29 + seedOffset * 0.31) * 1.15);
+    const high = Math.max(open, close) + upperWick;
+    const low = Math.max(0.0001, Math.min(open, close) - lowerWick);
+    const volume = Number(
+      (
+        volBase *
+        (0.55 +
+          (bodyMove / Math.max(0.0001, baseSpread)) * 0.9 +
+          seededUnit(bucketOrdinal * 9.17 + seedOffset * 0.43) * 0.85)
+      ).toFixed(2)
+    );
+
+    candles.push({
+      time: bucketTimeMs,
+      open,
+      high,
+      low,
+      close,
+      volume,
+    });
+  }
+  return candles;
+}
+
 /**
  * Aggregates recorded 1-minute OHLCV candles into higher timeframes (5m, 15m, 1h, 4h, 1d, 1w, 1mo)
  * preserving exact open, high, low, close, and cumulative volume.
@@ -245,7 +429,7 @@ export function aggregateCandlesByTimeframe(
 /**
  * Builds an exchange-consistent OHLCV history for Admin-managed custom coins:
  * - Preserves all permanently recorded 1m bars aggregated to the requested timeframe
- * - Anchors any pre-launch historical padding strictly to the immutable first recorded bar
+ * - Uses forward pure-deterministic UTC-bucket padding anchored to immutable anchor price
  *   so earlier candles NEVER change or jump when livePrice moves or timeframes are switched.
  */
 export function buildPersistentChartCandles(
@@ -260,16 +444,34 @@ export function buildPersistentChartCandles(
   const currentBucketStart = getCandleBucketStartMs(nowMs, timeframe);
 
   if (recorded1mBars.length === 0) {
-    return generateRealisticCandles(symbol, safeLive, timeframe, totalCount, currentBucketStart);
+    const closedCount = Math.max(1, totalCount - 1);
+    const prevEnd = stepCandleBucketMs(currentBucketStart, timeframe, -1);
+    const closedBars = generateForwardDeterministicCandles(
+      symbol,
+      safeLive,
+      timeframe,
+      closedCount,
+      prevEnd
+    );
+    const open = closedBars[closedBars.length - 1]?.close ?? safeLive;
+    return [
+      ...closedBars,
+      {
+        time: currentBucketStart,
+        open,
+        high: Math.max(open, safeLive),
+        low: Math.min(open, safeLive),
+        close: safeLive,
+        volume: Number((Math.max(18, Math.abs(safeLive - open) * 65 + 24)).toFixed(2)),
+      },
+    ];
   }
 
   const aggregated = aggregateCandlesByTimeframe(recorded1mBars, timeframe);
-  const stepMs = TIMEFRAME_MS[timeframe];
 
   // Fill forward or update the active current bucket with livePrice
   const lastRecorded = aggregated[aggregated.length - 1];
   if (lastRecorded.time < currentBucketStart) {
-    // Bridge seamlessly to current bucket if coin was idle
     aggregated.push({
       time: currentBucketStart,
       open: lastRecorded.close,
@@ -288,21 +490,17 @@ export function buildPersistentChartCandles(
     return aggregated.slice(-totalCount);
   }
 
-  // Deterministic pre-launch history anchored strictly to firstRecorded.open (immutable!)
+  // Deterministic pre-launch history anchored purely by fixed UTC bucket timestamps
   const firstRecorded = aggregated[0];
   const needed = totalCount - aggregated.length;
-  const preBars = generateRealisticCandles(
+  const prevEnd = stepCandleBucketMs(firstRecorded.time, timeframe, -1);
+  const prefix = generateForwardDeterministicCandles(
     `${symbol}:prelaunch`,
     firstRecorded.open,
     timeframe,
-    needed + 1,
-    firstRecorded.time
+    needed,
+    prevEnd
   );
-  // Drop the final anchor bar (which sits at firstRecorded.time) so timestamps step cleanly
-  const prefix = preBars.slice(0, needed).map((bar, idx) => ({
-    ...bar,
-    time: firstRecorded.time - (needed - idx) * stepMs,
-  }));
 
   return [...prefix, ...aggregated];
 }
