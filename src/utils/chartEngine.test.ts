@@ -6,6 +6,8 @@ import {
   DEFAULT_CHART_RIGHT_OFFSET,
   HISTORICAL_WAVE_CANDLES,
   MAX_CHART_RIGHT_OFFSET,
+  aggregateCandlesByTimeframe,
+  applyCustomCoinLiveTickToSeries,
   buildBinanceOrderBook,
   computeBollingerBands,
   computeCandleCutOffCountdown,
@@ -19,6 +21,7 @@ import {
   computeVisibleWindow,
   computeVolumeMa,
   computeVwap,
+  evaluateDeterministicCurvePrice,
   formatChartPrice,
   formatChartTimestamp,
   generateForwardDeterministicCandles,
@@ -29,6 +32,8 @@ import {
   getCandleBucketStartMs,
   getTickOptionsForPrice,
   hasFlatCandles,
+  mulberry32,
+  rollOverCustomCoinCandles,
   stepCandleBucketMs,
 } from './chartEngine';
 
@@ -332,6 +337,91 @@ test('generateForwardDeterministicCandles creates immutable zero-gap UTC candles
     assert.equal(monthly[i].open, monthly[i - 1].close);
   }
 });
+
+test('custom coin mulberry32 history aggregates 1m->5m->15m identically and connects seamlessly into live curve without tail spike', () => {
+  const rngA = mulberry32(123456);
+  const rngB = mulberry32(123456);
+  assert.equal(rngA(), rngB());
+  assert.equal(rngA(), rngB());
+
+  const current15mBucket = getCandleBucketStartMs(1763140900000, '15m');
+  const prev15mBucket = stepCandleBucketMs(current15mBucket, '15m', -1);
+
+  const hist200_15m = generateForwardDeterministicCandles('XUUSDT', 100, '15m', 200, prev15mBucket);
+  assert.equal(hist200_15m.length, 200);
+  assert.equal(hasFlatCandles(hist200_15m), false);
+
+  // Realistic alternating green and red candles (at least 25% of each)
+  const bullCount = hist200_15m.filter((c) => c.close > c.open).length;
+  const bearCount = hist200_15m.filter((c) => c.close < c.open).length;
+  assert.ok(bullCount >= 50 && bearCount >= 50, `Expected realistic mix, got bull=${bullCount}, bear=${bearCount}`);
+
+  // No giant spike: all 200 candles stay tightly bounded near basePrice=100, and last closed close connects seamlessly to live curve
+  const liveAtBoundary = evaluateDeterministicCurvePrice('XUUSDT', 100, current15mBucket);
+  const lastClosed = hist200_15m[hist200_15m.length - 1];
+  const boundaryGapPct = Math.abs(liveAtBoundary - lastClosed.close) / lastClosed.close;
+  assert.ok(boundaryGapPct < 0.001, `Expected seamless transition without spike, got ${(boundaryGapPct * 100).toFixed(4)}%`);
+
+  // Cross-timeframe aggregation parity: 1m bars aggregated into 15m match 15m history 100%
+  const oneMinStart = hist200_15m[190].time;
+  const oneMinEnd = stepCandleBucketMs(hist200_15m[199].time, '1m', 14);
+  const oneMinSlice = generateForwardDeterministicCandles('XUUSDT', 100, '1m', 150, oneMinEnd);
+  assert.equal(oneMinSlice[0].time, oneMinStart);
+  const agg15m = aggregateCandlesByTimeframe(oneMinSlice, '15m');
+  assert.deepEqual(agg15m, hist200_15m.slice(190));
+
+  // Consistency across 1m, 5m, 15m, 1h, 4h, 1d boundaries
+  for (const tf of ['1m', '5m', '15m', '1h', '4h', '1d'] as const) {
+    const endB = stepCandleBucketMs(getCandleBucketStartMs(1763140900000, tf), tf, -1);
+    const barsA = generateForwardDeterministicCandles('XUUSDT', 100, tf, 200, endB);
+    const barsB = generateForwardDeterministicCandles('XUUSDT', 100, tf, 200, endB);
+    assert.deepEqual(barsA, barsB);
+    assert.equal(hasFlatCandles(barsA), false);
+    for (const c of barsA) {
+      assert.ok(c.close >= 98.5 && c.close <= 101.5, `Expected ${tf} candle ${c.close} smoothly near $100`);
+    }
+  }
+});
+
+test('rollOverCustomCoinCandles and applyCustomCoinLiveTickToSeries freeze closed candles, catch up missed buckets, and update only active OHLCV', () => {
+  const t0 = getCandleBucketStartMs(1763140000000, '1m');
+  const initial = generateForwardDeterministicCandles('XUUSDT', 100, '1m', 201, t0);
+  const snapshotClosed = initial.slice(0, -1).map((c) => ({ ...c }));
+
+  // Within the same bucket: updates ONLY the last candle's close, high, low, volume
+  const sameBucketRes = applyCustomCoinLiveTickToSeries(initial, '1m', 100.42, t0 + 25_000, 201);
+  assert.equal(sameBucketRes.rolledCount, 0);
+  assert.deepEqual(sameBucketRes.candles.slice(0, -1), snapshotClosed);
+  const activeBar = sameBucketRes.candles[sameBucketRes.candles.length - 1];
+  assert.equal(activeBar.close, 100.42);
+  assert.ok(activeBar.high >= 100.42);
+  assert.ok(activeBar.volume > initial[initial.length - 1].volume);
+
+  // Rollover into next 1m bucket freezes previous candle and appends open=high=low=close=prev.close
+  const t1 = stepCandleBucketMs(t0, '1m', 1);
+  const rolledOnce = rollOverCustomCoinCandles(sameBucketRes.candles, '1m', t1 + 1000, 201);
+  assert.equal(rolledOnce.rolledCount, 1);
+  assert.equal(rolledOnce.candles.length, 201);
+  const frozenPrev = rolledOnce.candles[rolledOnce.candles.length - 2];
+  assert.deepEqual(frozenPrev, activeBar);
+  const brandNew = rolledOnce.candles[rolledOnce.candles.length - 1];
+  assert.equal(brandNew.time, t1);
+  assert.equal(brandNew.open, frozenPrev.close);
+  assert.equal(brandNew.high, frozenPrev.close);
+  assert.equal(brandNew.low, frozenPrev.close);
+  assert.equal(brandNew.close, frozenPrev.close);
+
+  // Tab switch catch-up across 3 missed 1m buckets spawns t1+1m, t1+2m, t1+3m sequentially
+  const t4 = stepCandleBucketMs(t1, '1m', 3);
+  const catchUp = applyCustomCoinLiveTickToSeries(rolledOnce.candles, '1m', 100.55, t4 + 5000, 201);
+  assert.equal(catchUp.rolledCount, 3);
+  assert.equal(catchUp.candles.length, 201);
+  assert.equal(catchUp.candles[catchUp.candles.length - 1].time, t4);
+  assert.equal(catchUp.candles[catchUp.candles.length - 1].open, brandNew.close);
+  assert.equal(catchUp.candles[catchUp.candles.length - 1].close, 100.55);
+  assert.equal(catchUp.candles[catchUp.candles.length - 2].time, stepCandleBucketMs(t1, '1m', 2));
+});
+
 
 
 

@@ -32,6 +32,7 @@ import {
   HISTORICAL_WAVE_CANDLES,
   MAX_CHART_RIGHT_OFFSET,
   TIMEFRAME_MS,
+  applyCustomCoinLiveTickToSeries,
   buildBinanceOrderBook,
   getCandleBucketStartMs,
   computeBollingerBands,
@@ -66,6 +67,7 @@ interface MarketChartProps {
 const TIMEFRAMES: ChartTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '1d', '1w', '1mo'];
 const TOTAL_CANDLES = 200;
 const BINANCE_HISTORY_LIMIT = 200;
+const CUSTOM_COIN_TOTAL_CANDLES = BINANCE_HISTORY_LIMIT + 1;
 const DEFAULT_VISIBLE_CANDLES = 48;
 const MIN_VISIBLE_CANDLES = 18;
 const NON_BINANCE_FIXED_ANCHOR: Record<string, number> = {
@@ -125,40 +127,6 @@ export const MarketChart: React.FC<MarketChartProps> = ({
       return [...historicalBars, liveCandle];
     },
     [targetCandleCount]
-  );
-
-  const syncTailToLivePrice = useCallback(
-    (series: OhlcvCandle[], livePrice: number, tf: ChartTimeframe): OhlcvCandle[] => {
-      if (!Array.isArray(series) || series.length === 0 || !Number.isFinite(livePrice) || livePrice <= 0) {
-        return series;
-      }
-      const next = [...series];
-      const last = next[next.length - 1];
-      const currentBucketMs = getCandleBucketStartMs(Date.now(), tf);
-      const lastBucketMs = getCandleBucketStartMs(last.time, tf);
-
-      if (currentBucketMs > lastBucketMs) {
-        const open = last.close;
-        const stepCandle: OhlcvCandle = {
-          time: currentBucketMs,
-          open,
-          high: Math.max(open, livePrice),
-          low: Math.min(open, livePrice),
-          close: livePrice,
-          volume: Number((Math.max(12, Math.abs(livePrice - open) * 65 + 6)).toFixed(2)),
-        };
-        return [...next.slice(-(BINANCE_HISTORY_LIMIT - 1)), stepCandle];
-      }
-
-      next[next.length - 1] = {
-        ...last,
-        close: livePrice,
-        high: Math.max(last.high, livePrice),
-        low: Math.min(last.low, livePrice),
-      };
-      return next;
-    },
-    []
   );
 
   const [candles, setCandles] = useState<OhlcvCandle[]>(() => {
@@ -333,7 +301,6 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     const controller = new AbortController();
     const binanceSym = getBinanceKlineSymbol(quote.symbol);
     const binanceInterval = getBinanceKlineInterval(timeframe);
-    let syncTimer: ReturnType<typeof setInterval> | null = null;
     let unsubCustomCoins: (() => void) | null = null;
 
     const loadCustomCoinCandles = async (clearFirst: boolean) => {
@@ -342,11 +309,58 @@ export const MarketChart: React.FC<MarketChartProps> = ({
         setDataSource('live');
       }
       try {
-        const rows = await getCustomCoinKlinesStatic(quote.symbol, timeframe, BINANCE_HISTORY_LIMIT);
-        if (!controller.signal.aborted && rows.length > 0) {
-          setCandles(syncTailToLivePrice(rows, livePriceRef.current, timeframe));
-          setDataSource('live');
+        const rows = await getCustomCoinKlinesStatic(quote.symbol, timeframe, CUSTOM_COIN_TOTAL_CANDLES);
+        if (controller.signal.aborted || rows.length === 0) return;
+
+        const nowSnap = Date.now();
+        if (clearFirst) {
+          setCandles(
+            applyCustomCoinLiveTickToSeries(
+              rows,
+              timeframe,
+              livePriceRef.current,
+              nowSnap,
+              CUSTOM_COIN_TOTAL_CANDLES
+            ).candles
+          );
+        } else {
+          setCandles((prev) => {
+            if (prev.length === 0) {
+              return applyCustomCoinLiveTickToSeries(
+                rows,
+                timeframe,
+                livePriceRef.current,
+                nowSnap,
+                CUSTOM_COIN_TOTAL_CANDLES
+              ).candles;
+            }
+            const prevClosed = prev.length >= 2 ? prev[prev.length - 2] : prev[prev.length - 1];
+            const nextClosed = rows.length >= 2 ? rows[rows.length - 2] : rows[rows.length - 1];
+            const sameClosedAnchor =
+              Boolean(prevClosed && nextClosed) &&
+              prevClosed.time === nextClosed.time &&
+              Math.abs(nextClosed.close - prevClosed.close) <= Math.max(1e-7, prevClosed.close * 1e-5);
+
+            // If Admin did NOT change anchor/bias/volatility, preserve accumulated active candle ticks/wicks
+            if (sameClosedAnchor) {
+              return applyCustomCoinLiveTickToSeries(
+                prev,
+                timeframe,
+                livePriceRef.current,
+                nowSnap,
+                CUSTOM_COIN_TOTAL_CANDLES
+              ).candles;
+            }
+            return applyCustomCoinLiveTickToSeries(
+              rows,
+              timeframe,
+              livePriceRef.current,
+              nowSnap,
+              CUSTOM_COIN_TOTAL_CANDLES
+            ).candles;
+          });
         }
+        setDataSource('live');
       } catch {
         // Retain current custom coin candles on transient errors
       }
@@ -394,9 +408,6 @@ export const MarketChart: React.FC<MarketChartProps> = ({
             void loadCustomCoinCandles(false);
           }
         });
-        syncTimer = setInterval(() => {
-          void loadCustomCoinCandles(false);
-        }, 15_000);
         return;
       }
 
@@ -425,15 +436,74 @@ export const MarketChart: React.FC<MarketChartProps> = ({
     return () => {
       controller.abort();
       if (unsubCustomCoins) unsubCustomCoins();
-      if (syncTimer) clearInterval(syncTimer);
     };
-  }, [quote.symbol, quote.isCustom, timeframe, buildForwardSeries, syncTailToLivePrice]);
+  }, [quote.symbol, quote.isCustom, timeframe, buildForwardSeries]);
+
+  // Custom Coins ONLY: 1-second interval timer for automatic UTC candle rollover & active-bar live ticks
+  useEffect(() => {
+    if (!quote.isCustom) return;
+    const tickCustomCandle = () => {
+      const nowSnap = Date.now();
+      const livePx = livePriceRef.current;
+      setCandles((prev) => {
+        if (prev.length === 0) return prev;
+        return applyCustomCoinLiveTickToSeries(
+          prev,
+          timeframe,
+          livePx,
+          nowSnap,
+          CUSTOM_COIN_TOTAL_CANDLES
+        ).candles;
+      });
+    };
+    const id = setInterval(tickCustomCandle, 1000);
+    return () => clearInterval(id);
+  }, [quote.isCustom, quote.symbol, timeframe]);
+
+  // Shift chart viewport forward cleanly if a Custom Coin rolls over while user is near the live edge
+  const prevCustomLastBarRef = useRef<{ symbol: string; tf: ChartTimeframe; time: number | null }>({
+    symbol: quote.symbol,
+    tf: timeframe,
+    time: null,
+  });
+  const latestCandleTimestamp = candles.length > 0 ? candles[candles.length - 1].time : null;
+  useEffect(() => {
+    if (!quote.isCustom || latestCandleTimestamp === null) {
+      prevCustomLastBarRef.current = { symbol: quote.symbol, tf: timeframe, time: null };
+      return;
+    }
+    const prevMeta = prevCustomLastBarRef.current;
+    if (
+      prevMeta.symbol === quote.symbol &&
+      prevMeta.tf === timeframe &&
+      prevMeta.time !== null &&
+      latestCandleTimestamp > prevMeta.time
+    ) {
+      if (rightGapRef.current < 0 && rightGapRef.current >= -2.5) {
+        setRightGapSlots((g) => Math.max(0.5, g + 1));
+      }
+    }
+    prevCustomLastBarRef.current = {
+      symbol: quote.symbol,
+      tf: timeframe,
+      time: latestCandleTimestamp,
+    };
+  }, [quote.isCustom, quote.symbol, timeframe, latestCandleTimestamp]);
 
   // Stream live price ONLY into the latest active candle (closed historical bars remain 100% locked)
   useEffect(() => {
     if (!Number.isFinite(quote.price) || quote.price <= 0) return;
     setCandles((prev) => {
       if (prev.length === 0) return prev;
+      if (quote.isCustom) {
+        return applyCustomCoinLiveTickToSeries(
+          prev,
+          timeframe,
+          quote.price,
+          Date.now(),
+          CUSTOM_COIN_TOTAL_CANDLES
+        ).candles;
+      }
       const last = prev[prev.length - 1];
       const now = Date.now();
       const currentBucketMs = getCandleBucketStartMs(now, timeframe);
@@ -1684,6 +1754,16 @@ export const MarketChart: React.FC<MarketChartProps> = ({
               {/* Main SVG Candlestick & Indicator Canvas */}
               <svg
                 ref={svgRef}
+                data-testid="market-chart-svg"
+                data-symbol={quote.symbol}
+                data-is-custom={quote.isCustom ? 'true' : 'false'}
+                data-timeframe={timeframe}
+                data-candle-count={candles.length}
+                data-last-candle-time={lastCandle?.time ?? ''}
+                data-last-candle-open={lastCandle?.open ?? ''}
+                data-last-candle-high={lastCandle?.high ?? ''}
+                data-last-candle-low={lastCandle?.low ?? ''}
+                data-last-candle-close={lastCandle?.close ?? ''}
                 viewBox={`0 0 ${svgWidth} ${svgHeight}`}
                 className={`w-full select-none touch-none ${
                   isDraggingChart ? 'cursor-grabbing' : 'cursor-crosshair'

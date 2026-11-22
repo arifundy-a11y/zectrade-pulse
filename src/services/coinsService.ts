@@ -568,35 +568,38 @@ export async function getCustomCoinKlinesStatic(
     forwardOptions
   );
 
-  // Sample deterministic intra-bucket ticks from currentBucketStart to utcSecMs for live wicks
+  // Sample deterministic intra-bucket ticks from currentBucketStart to utcSecMs for accurate live wicks
   const liveOpen = historicalBars[historicalBars.length - 1]?.close ?? anchorBasePrice;
   const liveClose = liveCoin.currentPrice;
   let liveHigh = Math.max(liveOpen, liveClose);
   let liveLow = Math.min(liveOpen, liveClose);
 
   const elapsedMs = Math.max(0, utcSecMs - currentBucketStart);
-  for (const frac of [0.25, 0.5, 0.75]) {
-    const sampleTs = currentBucketStart + Math.floor((elapsedMs * frac) / 1000) * 1000;
-    const samplePrice = evaluateCoinTick(target, sampleTs, false).coin.currentPrice;
-    if (Number.isFinite(samplePrice) && samplePrice > 0) {
-      liveHigh = Math.max(liveHigh, samplePrice);
-      liveLow = Math.min(liveLow, samplePrice);
+  if (elapsedMs >= 2000) {
+    for (let step = 1; step <= 8; step++) {
+      const sampleTs =
+        currentBucketStart + Math.floor(((elapsedMs * step) / 9) / 1000) * 1000;
+      const samplePrice = evaluateCoinTick(target, sampleTs, false).coin.currentPrice;
+      if (Number.isFinite(samplePrice) && samplePrice > 0) {
+        liveHigh = Math.max(liveHigh, samplePrice);
+        liveLow = Math.min(liveLow, samplePrice);
+      }
     }
   }
 
-  const spreadFloor = Math.max(liveClose * 0.0008, 0.000001);
-  if (liveHigh - liveLow < spreadFloor) {
-    liveHigh = Math.max(liveHigh, Math.max(liveOpen, liveClose) + spreadFloor * 0.5);
-    liveLow = Math.max(0.0001, Math.min(liveLow, Math.min(liveOpen, liveClose) - spreadFloor * 0.5));
-  }
-
+  const movePct = liveOpen > 0 ? Math.abs(liveClose - liveOpen) / liveOpen : 0;
+  const rangePct = liveOpen > 0 ? (liveHigh - liveLow) / liveOpen : 0;
+  const elapsedMinutes = Math.max(0.02, elapsedMs / 60_000);
+  const volBase = anchorBasePrice > 10000 ? 18 : anchorBasePrice > 1000 ? 110 : 680;
   const liveCandle: OhlcvCandle = {
     time: currentBucketStart,
     open: liveOpen,
     high: liveHigh,
     low: liveLow,
     close: liveClose,
-    volume: Number((Math.max(18, Math.abs(liveClose - liveOpen) * 65 + 24)).toFixed(2)),
+    volume: Number(
+      (volBase * Math.min(4, Math.sqrt(elapsedMinutes)) * (0.2 + (movePct + rangePct) * 180)).toFixed(2)
+    ),
   };
 
   const series = [...historicalBars, liveCandle];

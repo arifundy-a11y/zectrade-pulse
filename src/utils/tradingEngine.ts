@@ -14,6 +14,7 @@ import type {
   UserRole,
   WalletTransaction,
 } from '../types';
+import { evaluateDeterministicCurvePrice } from './chartEngine';
 
 export const OPEN_FEE_RATE = 0.0018; // 0.18% per trade open
 export const CLOSE_FEE_RATE = 0.0018; // 0.18% per trade close
@@ -603,25 +604,14 @@ export function computeOrganicMarketTickPrice(
   trendBias: CoinTrendBias = 'neutral'
 ): number {
   const safeAnchor = Number.isFinite(anchorPrice) && anchorPrice > 0 ? anchorPrice : 1;
-  const secBucket = Math.floor(nowMs / 1000);
-  const seed = symbol.split('').reduce((acc, ch, i) => acc + ch.charCodeAt(0) * (i + 3), 0);
-
-  const slowWave = Math.sin((secBucket + seed) * 0.055) * 0.52;
-  const midWave = Math.cos((secBucket + seed * 2) * 0.23) * 0.31;
-  const fastWave = Math.sin((secBucket + seed * 5) * 0.91) * 0.17;
-  const pseudoHash = Math.sin((secBucket + 1) * 12.9898 + seed * 78.233) * 43758.5453;
-  const microTick = ((pseudoHash - Math.floor(pseudoHash)) - 0.5) * 0.5;
-
-  // Gradual cyclical trend bias wave when Admin tilts ongoing market sentiment up or down
-  const biasWave =
-    trendBias === 'up'
-      ? 0.0035 + Math.sin(secBucket * 0.015) * 0.0025
-      : trendBias === 'down'
-      ? -(0.0035 + Math.sin(secBucket * 0.015) * 0.0025)
-      : 0;
-
-  const pctOffset = (slowWave + midWave + fastWave + microTick) * amplitudePct + biasWave;
-  return roundCoinPrice(Math.max(0.0001, safeAnchor * (1 + pctOffset)));
+  const utcSecMs = Math.floor(nowMs / 1000) * 1000;
+  const volatilityLevel =
+    amplitudePct <= 0.0028 ? 'calm' : amplitudePct >= 0.006 ? 'active' : 'normal';
+  const rawPrice = evaluateDeterministicCurvePrice(symbol, safeAnchor, utcSecMs, {
+    trendBias,
+    volatilityLevel,
+  });
+  return roundCoinPrice(Math.max(0.0001, rawPrice));
 }
 
 export function computeScheduledCoinPrice(

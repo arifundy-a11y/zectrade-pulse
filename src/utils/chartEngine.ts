@@ -219,33 +219,38 @@ export function stepCandleBucketMs(
   return bucketStartMs + deltaBuckets * TIMEFRAME_MS[timeframe];
 }
 
-function getBucketOrdinalIndex(bucketStartMs: number, timeframe: ChartTimeframe): number {
-  if (timeframe === '1mo') {
-    const d = new Date(bucketStartMs);
-    return d.getUTCFullYear() * 12 + d.getUTCMonth();
+export function hashSymbolSeed(input: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
   }
-  return Math.floor(bucketStartMs / TIMEFRAME_MS[timeframe]);
+  return h >>> 0;
 }
 
-function getTimeframeStepVolatility(timeframe: ChartTimeframe): number {
-  switch (timeframe) {
-    case '1m':
-      return 0.0022;
-    case '5m':
-      return 0.0038;
-    case '15m':
-      return 0.0058;
-    case '1h':
-      return 0.0088;
-    case '4h':
-      return 0.0145;
-    case '1d':
-      return 0.022;
-    case '1w':
-      return 0.042;
-    case '1mo':
-      return 0.072;
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function seededTriangular(key: string): number {
+  const next = mulberry32(hashSymbolSeed(key));
+  // Centered [-1, 1] triangular distribution via mulberry32
+  return next() + next() - 1;
+}
+
+function evaluateOuBlock(tag: string, blockIdx: number, decay: number, windowSize: number): number {
+  let acc = 0;
+  for (let j = 0; j < windowSize; j++) {
+    acc += Math.pow(decay, j) * seededTriangular(`${tag}:${blockIdx - j}`);
   }
+  return Math.tanh((acc / Math.sqrt(windowSize)) * 1.48);
 }
 
 export interface ForwardCandleOptions {
@@ -253,70 +258,235 @@ export interface ForwardCandleOptions {
   volatilityLevel?: 'calm' | 'normal' | 'active';
 }
 
-function evaluateRawBucketBoundaryPrice(
-  seedOffset: number,
-  anchorPrice: number,
-  bucketOrdinal: number,
-  timeframe: ChartTimeframe,
-  options?: ForwardCandleOptions
-): number {
-  const stepVol = getTimeframeStepVolatility(timeframe);
-  const volMult =
-    options?.volatilityLevel === 'calm'
-      ? 0.55
-      : options?.volatilityLevel === 'active'
-      ? 1.55
-      : 1.0;
-
-  const macro = Math.sin(bucketOrdinal * 0.078 + seedOffset * 0.13) * (stepVol * 4.8);
-  const swing = Math.cos(bucketOrdinal * 0.193 + seedOffset * 0.29) * (stepVol * 2.6);
-  const harmonic = Math.sin(bucketOrdinal * 0.431 + seedOffset * 0.57) * (stepVol * 1.45);
-  const jitter = (seededUnit(bucketOrdinal * 1.73 + seedOffset * 0.41) - 0.5) * (stepVol * 1.65);
-
-  const biasDrift =
-    options?.trendBias === 'up'
-      ? stepVol * 1.8 + Math.sin(bucketOrdinal * 0.024) * (stepVol * 1.2)
-      : options?.trendBias === 'down'
-      ? -(stepVol * 1.8 + Math.sin(bucketOrdinal * 0.024) * (stepVol * 1.2))
-      : 0;
-
-  const totalLogOffset = (macro + swing + harmonic + jitter) * volMult + biasDrift;
-  return Math.max(0.0001, anchorPrice * Math.exp(totalLogOffset));
+function getVolatilityMultiplier(options?: ForwardCandleOptions): number {
+  return options?.volatilityLevel === 'calm'
+    ? 0.55
+    : options?.volatilityLevel === 'active'
+    ? 1.45
+    : 1.0;
 }
 
-function evaluateLockedBucketClosePrice(
-  seedOffset: number,
+/**
+ * Evaluates the deterministic multi-scale boundary log-price offset at an exact UTC minute boundary.
+ * Combines 1d/1h/15m/1m mulberry32 mean-reverting random walks + smooth multi-octave waves
+ * so price oscillates organically around anchorPrice with pullbacks, runs, and zero cliff spikes.
+ */
+function evaluateMinuteBoundaryLogOffset(
+  symbol: string,
+  minuteIdx: number,
+  options?: ForwardCandleOptions
+): number {
+  const volMult = getVolatilityMultiplier(options);
+  const symPhase = (hashSymbolSeed(symbol) % 10007) * 0.0017;
+
+  // 1) Macro daily regime wave + 1d seeded walk (smoothly interpolated per minute)
+  const dayIdx = Math.floor(minuteIdx / 1440);
+  const dayFrac = (minuteIdx - dayIdx * 1440) / 1440;
+  const d0 = evaluateOuBlock(`${symbol}:1d`, dayIdx, 0.8, 12);
+  const d1 = evaluateOuBlock(`${symbol}:1d`, dayIdx + 1, 0.8, 12);
+  const dSmooth = d0 + (d1 - d0) * dayFrac;
+  const macroWave = Math.sin(minuteIdx * 0.00065 + symPhase) * 0.35;
+  const macroOffset = (dSmooth * 0.85 + macroWave * 0.15) * 0.0028;
+
+  // 2) Swing 1h seeded random walk
+  const hourIdx = Math.floor(minuteIdx / 60);
+  const hourFrac = (minuteIdx - hourIdx * 60) / 60;
+  const h0 = evaluateOuBlock(`${symbol}:1h`, hourIdx, 0.82, 14);
+  const h1 = evaluateOuBlock(`${symbol}:1h`, hourIdx + 1, 0.82, 14);
+  const hSmooth = h0 + (h1 - h0) * hourFrac;
+  const swingWave = Math.cos(minuteIdx * 0.0085 + symPhase * 1.9) * 0.25;
+  const swingOffset = (hSmooth * 0.85 + swingWave * 0.15) * 0.0022;
+
+  // 3) Intraday 15m seeded random walk
+  const qIdx = Math.floor(minuteIdx / 15);
+  const qFrac = (minuteIdx - qIdx * 15) / 15;
+  const q0 = evaluateOuBlock(`${symbol}:15m`, qIdx, 0.82, 12);
+  const q1 = evaluateOuBlock(`${symbol}:15m`, qIdx + 1, 0.82, 12);
+  const qSmooth = q0 + (q1 - q0) * qFrac;
+  const qOffset = qSmooth * 0.0018;
+
+  // 4) 1m microstructure random walk
+  const mVal = evaluateOuBlock(`${symbol}:1m`, minuteIdx, 0.84, 12);
+  const mOffset = mVal * 0.0016;
+
+  // Subtle deterministic non-zero nudge so two adjacent 1m boundaries are never identical
+  const parityMicro = ((minuteIdx & 1) === 0 ? 1 : -1) * 0.00018;
+
+  const biasOffset =
+    options?.trendBias === 'up'
+      ? (0.0038 + Math.sin(minuteIdx * 0.015) * 0.0008) * volMult
+      : options?.trendBias === 'down'
+      ? -(0.0038 + Math.sin(minuteIdx * 0.015) * 0.0008) * volMult
+      : 0;
+
+  return (macroOffset + swingOffset + qOffset + mOffset + parityMicro) * volMult + biasOffset;
+}
+
+function evaluateMinuteBoundaryPrice(
+  symbol: string,
   anchorPrice: number,
-  bucketOrdinal: number,
+  minuteIdx: number,
+  options?: ForwardCandleOptions
+): number {
+  const safeAnchor = Number.isFinite(anchorPrice) && anchorPrice > 0 ? anchorPrice : 100;
+  const logOffset = evaluateMinuteBoundaryLogOffset(symbol, minuteIdx, options);
+  return Math.max(0.0001, safeAnchor * Math.exp(logOffset));
+}
+
+function evaluateLockedMinuteBoundaryPrice(
+  symbol: string,
+  anchorPrice: number,
+  minuteIdx: number,
+  options?: ForwardCandleOptions
+): number {
+  const curr = evaluateMinuteBoundaryPrice(symbol, anchorPrice, minuteIdx, options);
+  const prev = evaluateMinuteBoundaryPrice(symbol, anchorPrice, minuteIdx - 1, options);
+  const minEps = Math.max(1e-7, prev * 0.00025);
+  if (Math.abs(curr - prev) < minEps) {
+    const dir = (minuteIdx & 1) === 0 ? 1 : -1;
+    return Math.max(0.0001, prev + dir * minEps * 1.4);
+  }
+  return curr;
+}
+
+/**
+ * Generates a deterministic 60-step intra-minute Brownian bridge path (61 points t=0..60)
+ * between minuteOpen (t=0) and minuteClose (t=60) seeded by symbol + minuteStartMs.
+ */
+function buildMinuteIntraPath(
+  symbol: string,
+  anchorPrice: number,
+  minuteStartMs: number,
+  minuteOpen: number,
+  minuteClose: number,
+  options?: ForwardCandleOptions
+): number[] {
+  const volMult = getVolatilityMultiplier(options);
+  const prng = mulberry32(hashSymbolSeed(`${symbol}:intra:${minuteStartMs}`));
+  const walks = new Array<number>(61);
+  walks[0] = 0;
+  for (let s = 1; s <= 60; s++) {
+    const shock = prng() + prng() - 1;
+    walks[s] = walks[s - 1] + shock;
+  }
+  const endWalk = walks[60];
+  const bridgeScale = Math.max(0.00001, anchorPrice * 0.00042 * volMult);
+  const path = new Array<number>(61);
+  path[0] = minuteOpen;
+  for (let s = 1; s < 60; s++) {
+    const frac = s / 60;
+    const bridge = (walks[s] - frac * endWalk) * bridgeScale;
+    const linear = minuteOpen + frac * (minuteClose - minuteOpen);
+    path[s] = Math.max(0.0001, linear + bridge);
+  }
+  path[60] = minuteClose;
+  return path;
+}
+
+/**
+ * Evaluates the exact deterministic 1-second live price at utcMs along the same
+ * underlying seeded curve that builds closed historical candles, guaranteeing zero jump
+ * when a live candle closes or when the page is reloaded.
+ */
+export function evaluateDeterministicCurvePrice(
+  symbol: string,
+  anchorPrice: number,
+  utcMs: number,
+  options?: ForwardCandleOptions
+): number {
+  const safeAnchor = Number.isFinite(anchorPrice) && anchorPrice > 0 ? anchorPrice : 100;
+  const minuteIdx = Math.floor(utcMs / 60_000);
+  const minuteStartMs = minuteIdx * 60_000;
+  const secInMinute = Math.max(0, Math.min(59, Math.floor((utcMs - minuteStartMs) / 1000)));
+  if (secInMinute === 0) {
+    return evaluateLockedMinuteBoundaryPrice(symbol, safeAnchor, minuteIdx, options);
+  }
+  const minuteOpen = evaluateLockedMinuteBoundaryPrice(symbol, safeAnchor, minuteIdx, options);
+  const minuteClose = evaluateLockedMinuteBoundaryPrice(symbol, safeAnchor, minuteIdx + 1, options);
+  const path = buildMinuteIntraPath(symbol, safeAnchor, minuteStartMs, minuteOpen, minuteClose, options);
+  return path[secInMinute];
+}
+
+/**
+ * Evaluates a single immutable 1m OHLCV candle strictly from its fixed UTC minute timestamp.
+ * Its open/close/high/low match the exact min/max/endpoints of the 60-second live tick path.
+ */
+export function evaluateDeterministic1mBar(
+  symbol: string,
+  anchorPrice: number,
+  minuteStartMs: number,
+  options?: ForwardCandleOptions
+): OhlcvCandle {
+  const safeAnchor = Number.isFinite(anchorPrice) && anchorPrice > 0 ? anchorPrice : 100;
+  const volMult = getVolatilityMultiplier(options);
+  const minuteIdx = Math.floor(minuteStartMs / 60_000);
+  const open = evaluateLockedMinuteBoundaryPrice(symbol, safeAnchor, minuteIdx, options);
+  const close = evaluateLockedMinuteBoundaryPrice(symbol, safeAnchor, minuteIdx + 1, options);
+  const path = buildMinuteIntraPath(symbol, safeAnchor, minuteStartMs, open, close, options);
+
+  let high = Math.max(open, close);
+  let low = Math.min(open, close);
+  for (let s = 1; s < 60; s++) {
+    if (path[s] > high) high = path[s];
+    if (path[s] < low) low = path[s];
+  }
+
+  // Ensure crisp realistic upper/lower wicks on every 1m bar
+  const prng = mulberry32(hashSymbolSeed(`${symbol}:1mw:${minuteStartMs}`));
+  const body = Math.abs(close - open);
+  const minWick = Math.max(safeAnchor * 0.00018 * volMult, body * 0.22);
+  if (high - Math.max(open, close) < minWick * 0.4) {
+    high = Math.max(open, close) + minWick * (0.45 + prng() * 0.9);
+  }
+  if (Math.min(open, close) - low < minWick * 0.4) {
+    low = Math.max(0.0001, Math.min(open, close) - minWick * (0.45 + prng() * 0.9));
+  }
+
+  const volBase = safeAnchor > 10000 ? 38 : safeAnchor > 1000 ? 220 : 1450;
+  const spread = Math.max(0.0001, high - low);
+  const volume = Number(
+    (volBase * (0.45 + (body / spread) * 0.85 + prng() * 1.15) * (0.75 + 0.25 * volMult)).toFixed(2)
+  );
+
+  return {
+    time: minuteStartMs,
+    open,
+    high,
+    low,
+    close,
+    volume,
+  };
+}
+
+function evaluateLockedTfBoundaryPrice(
+  symbol: string,
+  anchorPrice: number,
+  boundaryMs: number,
   timeframe: ChartTimeframe,
   options?: ForwardCandleOptions
 ): number {
-  const rawCurr = evaluateRawBucketBoundaryPrice(
-    seedOffset,
-    anchorPrice,
-    bucketOrdinal,
-    timeframe,
-    options
-  );
-  const rawPrev = evaluateRawBucketBoundaryPrice(
-    seedOffset,
-    anchorPrice,
-    bucketOrdinal - 1,
-    timeframe,
-    options
-  );
-  const minDelta = rawPrev * Math.max(0.0005, getTimeframeStepVolatility(timeframe) * 0.16);
-  if (Math.abs(rawCurr - rawPrev) < minDelta) {
-    const dir = (bucketOrdinal & 1) === 0 ? 1 : -1;
-    return Math.max(0.0001, rawPrev + dir * minDelta * 1.35);
+  const currMinIdx = Math.floor(boundaryMs / 60_000);
+  const prevBoundaryMs = stepCandleBucketMs(boundaryMs, timeframe, -1);
+  const prevMinIdx = Math.floor(prevBoundaryMs / 60_000);
+  const curr = evaluateLockedMinuteBoundaryPrice(symbol, anchorPrice, currMinIdx, options);
+  const prev = evaluateLockedMinuteBoundaryPrice(symbol, anchorPrice, prevMinIdx, options);
+  const minDiff = Math.max(1e-7, prev * 0.00025);
+  if (Math.abs(curr - prev) < minDiff) {
+    const dir = (currMinIdx & 1) === 0 ? 1 : -1;
+    return Math.max(0.0001, prev + dir * minDiff * 1.4);
   }
-  return rawCurr;
+  return curr;
 }
 
 /**
  * Generates immutable, zero-gap candlesticks strictly forward from fixed UTC bucket timestamps,
  * timeframe interval, symbol seed, and Admin-configured anchor parameters (NEVER backwards from livePrice
- * and NEVER using Math.random()). Every closed bucket stays 100% locked across reloads and devices.
+ * and NEVER using Math.random()).
+ *
+ * - `1m` evaluates exact 1m seeded random-walk bars.
+ * - `5m` and `15m` aggregate the underlying `1m` deterministic bars so OHLCV matches 100%.
+ * - `1h`, `4h`, `1d`, `1w`, `1mo` share the exact same `evaluateLockedMinuteBoundaryPrice` curve
+ *   and sample intra-bucket boundary extrema + deterministic wicks for fast, seamless consistency.
  */
 export function generateForwardDeterministicCandles(
   symbol: MarketSymbol,
@@ -328,59 +498,68 @@ export function generateForwardDeterministicCandles(
 ): OhlcvCandle[] {
   const safeCount = Math.max(2, Math.round(count));
   const safeAnchor = Number.isFinite(anchorPrice) && anchorPrice > 0 ? anchorPrice : 100;
-  const stepVol = getTimeframeStepVolatility(timeframe);
-  const volMult =
-    options?.volatilityLevel === 'calm'
-      ? 0.55
-      : options?.volatilityLevel === 'active'
-      ? 1.55
-      : 1.0;
-
-  const seedOffset = symbol
-    .split('')
-    .reduce((acc, ch, idx) => acc + ch.charCodeAt(0) * (idx + 17), 0);
-
   const alignedEndMs = getCandleBucketStartMs(endTimeMs, timeframe);
+
+  if (timeframe === '1m' || timeframe === '5m' || timeframe === '15m') {
+    const minsPerBar = timeframe === '1m' ? 1 : timeframe === '5m' ? 5 : 15;
+    const firstBucketStart = stepCandleBucketMs(alignedEndMs, timeframe, -(safeCount - 1));
+    const total1mBars = safeCount * minsPerBar;
+    const oneMinBars = new Array<OhlcvCandle>(total1mBars);
+    for (let i = 0; i < total1mBars; i++) {
+      oneMinBars[i] = evaluateDeterministic1mBar(symbol, safeAnchor, firstBucketStart + i * 60_000, options);
+    }
+    const aggregated =
+      timeframe === '1m' ? oneMinBars : aggregateCandlesByTimeframe(oneMinBars, timeframe);
+    return aggregated.slice(-safeCount);
+  }
+
+  const volMult = getVolatilityMultiplier(options);
   const volBase = safeAnchor > 10000 ? 38 : safeAnchor > 1000 ? 220 : 1450;
+  const tfStepMinutes =
+    timeframe === '1h' ? 60 : timeframe === '4h' ? 240 : timeframe === '1d' ? 1440 : 10080;
 
   const candles: OhlcvCandle[] = [];
   for (let i = 0; i < safeCount; i++) {
     const deltaFromEnd = i - (safeCount - 1);
-    const bucketTimeMs = stepCandleBucketMs(alignedEndMs, timeframe, deltaFromEnd);
-    const bucketOrdinal = getBucketOrdinalIndex(bucketTimeMs, timeframe);
+    const bucketStartMs = stepCandleBucketMs(alignedEndMs, timeframe, deltaFromEnd);
+    const bucketEndMs = stepCandleBucketMs(bucketStartMs, timeframe, 1);
 
-    const open = evaluateLockedBucketClosePrice(
-      seedOffset,
-      safeAnchor,
-      bucketOrdinal - 1,
-      timeframe,
-      options
-    );
-    const close = evaluateLockedBucketClosePrice(
-      seedOffset,
-      safeAnchor,
-      bucketOrdinal,
-      timeframe,
-      options
-    );
+    const startMinuteIdx = Math.floor(bucketStartMs / 60_000);
+    const endMinuteIdx = Math.floor(bucketEndMs / 60_000);
+    const spanMinutes = Math.max(1, endMinuteIdx - startMinuteIdx);
 
-    const bodyMove = Math.abs(close - open);
-    const baseSpread = Math.max(close * stepVol * 0.48 * volMult, bodyMove * 0.36);
-    const upperWick = baseSpread * (0.28 + seededUnit(bucketOrdinal * 5.13 + seedOffset * 0.19) * 1.15);
-    const lowerWick = baseSpread * (0.28 + seededUnit(bucketOrdinal * 7.29 + seedOffset * 0.31) * 1.15);
-    const high = Math.max(open, close) + upperWick;
-    const low = Math.max(0.0001, Math.min(open, close) - lowerWick);
+    const open = evaluateLockedTfBoundaryPrice(symbol, safeAnchor, bucketStartMs, timeframe, options);
+    const close = evaluateLockedTfBoundaryPrice(symbol, safeAnchor, bucketEndMs, timeframe, options);
+
+    // Sample intra-bucket boundary nodes to reflect true intermediate swings
+    const sampleCount = timeframe === '1h' ? 30 : 32;
+    let high = Math.max(open, close);
+    let low = Math.min(open, close);
+    for (let s = 1; s < sampleCount; s++) {
+      const mIdx = startMinuteIdx + Math.round((s * spanMinutes) / sampleCount);
+      const p = evaluateLockedMinuteBoundaryPrice(symbol, safeAnchor, mIdx, options);
+      if (p > high) high = p;
+      if (p < low) low = p;
+    }
+
+    const prng = mulberry32(hashSymbolSeed(`${symbol}:${timeframe}:${bucketStartMs}`));
+    const body = Math.abs(close - open);
+    const spanSpread = Math.max(safeAnchor * 0.00045 * volMult, body * 0.32);
+    high = Math.max(high, Math.max(open, close) + spanSpread * (0.25 + prng() * 0.85));
+    low = Math.max(0.0001, Math.min(low, Math.min(open, close) - spanSpread * (0.25 + prng() * 0.85)));
+
+    const barMultiplier = Math.max(1, Math.sqrt(Math.min(1440, tfStepMinutes)));
     const volume = Number(
       (
         volBase *
-        (0.55 +
-          (bodyMove / Math.max(0.0001, baseSpread)) * 0.9 +
-          seededUnit(bucketOrdinal * 9.17 + seedOffset * 0.43) * 0.85)
+        barMultiplier *
+        (0.45 + (body / Math.max(0.0001, high - low)) * 0.85 + prng() * 1.05) *
+        (0.75 + 0.25 * volMult)
       ).toFixed(2)
     );
 
     candles.push({
-      time: bucketTimeMs,
+      time: bucketStartMs,
       open,
       high,
       low,
@@ -389,6 +568,116 @@ export function generateForwardDeterministicCandles(
     });
   }
   return candles;
+}
+
+/**
+ * Advances a Custom Coin candle series whenever nowMs enters a newer timeframe bucket
+ * (including catching up across multiple missed buckets if tabs were switched).
+ * Closed candles are permanently frozen; each newly spawned bucket starts with
+ * open = high = low = close = prevCandle.close.
+ */
+export function rollOverCustomCoinCandles(
+  candles: OhlcvCandle[],
+  timeframe: ChartTimeframe,
+  nowMs: number,
+  maxCandles = 201
+): { candles: OhlcvCandle[]; rolledCount: number } {
+  if (!Array.isArray(candles) || candles.length === 0) {
+    return { candles: Array.isArray(candles) ? candles : [], rolledCount: 0 };
+  }
+  const currentBucketMs = getCandleBucketStartMs(nowMs, timeframe);
+  const last = candles[candles.length - 1];
+  const lastBucketMs = getCandleBucketStartMs(last.time, timeframe);
+
+  if (currentBucketMs <= lastBucketMs) {
+    return { candles, rolledCount: 0 };
+  }
+
+  const nextSeries = [...candles];
+  let cursorBucket = lastBucketMs;
+  let prevClose = last.close;
+  let rolledCount = 0;
+  const maxSteps = Math.max(1, maxCandles);
+
+  while (cursorBucket < currentBucketMs && rolledCount < maxSteps) {
+    const nextBucket = stepCandleBucketMs(cursorBucket, timeframe, 1);
+    const targetTime = nextBucket <= currentBucketMs ? nextBucket : currentBucketMs;
+    nextSeries.push({
+      time: targetTime,
+      open: prevClose,
+      high: prevClose,
+      low: prevClose,
+      close: prevClose,
+      volume: 0,
+    });
+    cursorBucket = targetTime;
+    rolledCount += 1;
+  }
+
+  if (cursorBucket < currentBucketMs) {
+    nextSeries.push({
+      time: currentBucketMs,
+      open: prevClose,
+      high: prevClose,
+      low: prevClose,
+      close: prevClose,
+      volume: 0,
+    });
+    rolledCount += 1;
+  }
+
+  return {
+    candles: nextSeries.slice(-Math.max(2, maxCandles)),
+    rolledCount,
+  };
+}
+
+/**
+ * Performs 1-second candle rollover + active-candle live price tick update for Custom Coins:
+ * - Freezes closed candles permanently (`time < currentBucket`)
+ * - Spawns new candle(s) on UTC interval boundary (`open = high = low = close = prev.close`)
+ * - Updates ONLY the active rightmost candle's close, high, low, and volume
+ */
+export function applyCustomCoinLiveTickToSeries(
+  candles: OhlcvCandle[],
+  timeframe: ChartTimeframe,
+  livePrice: number,
+  nowMs: number,
+  maxCandles = 201
+): { candles: OhlcvCandle[]; rolledCount: number } {
+  const rolled = rollOverCustomCoinCandles(candles, timeframe, nowMs, maxCandles);
+  if (rolled.candles.length === 0 || !Number.isFinite(livePrice) || livePrice <= 0) {
+    return rolled;
+  }
+
+  const next = rolled.candles === candles ? [...candles] : rolled.candles;
+  const lastIdx = next.length - 1;
+  const last = next[lastIdx];
+
+  const priceDelta = Math.abs(livePrice - last.close);
+  const changed = livePrice !== last.close;
+
+  if (!changed && rolled.rolledCount === 0) {
+    return { candles, rolledCount: 0 };
+  }
+
+  const relDelta = last.close > 0 ? priceDelta / last.close : 0;
+  const tickVolBump = changed
+    ? Number((Math.max(1.5, relDelta * 18000)).toFixed(2))
+    : 0;
+
+  next[lastIdx] = {
+    ...last,
+    close: livePrice,
+    high: Math.max(last.high, livePrice),
+    low: Math.min(last.low, livePrice),
+    volume: Number(((last.volume || 0) + tickVolBump).toFixed(2)),
+  };
+
+  return {
+    candles: next,
+    rolledCount: rolled.rolledCount,
+  };
 }
 
 /**
