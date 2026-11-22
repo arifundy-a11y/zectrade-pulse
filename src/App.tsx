@@ -691,7 +691,11 @@ export default function App() {
           unsubOrd = onSnapshot(
             collection(db, 'users', fbUser.uid, 'orders'),
             (qSnap) => {
-              setPreOrders(qSnap.docs.map((d) => ({ id: d.id, ...d.data() } as PreOrder)));
+              setPreOrders(
+                qSnap.docs
+                  .filter((d) => !triggeredPreOrderIdsRef.current.has(d.id))
+                  .map((d) => ({ id: d.id, ...d.data() } as PreOrder))
+              );
             },
             () => {
               // Ignore listener permission/offline errors gracefully
@@ -1298,9 +1302,15 @@ export default function App() {
       if (!q) continue;
       if (shouldTriggerPreOrder(order, q.price)) {
         triggeredPreOrderIdsRef.current.add(order.id);
-        setPreOrders((prev) => prev.filter((o) => o.id !== order.id));
         const filledPos: Position = { ...order, markPrice: q.price };
-        setActivePositions((prev) => [...prev, filledPos]);
+        stateRef.current.preOrders = stateRef.current.preOrders.filter((o) => o.id !== order.id);
+        if (!stateRef.current.activePositions.some((p) => p.id === order.id)) {
+          stateRef.current.activePositions = [...stateRef.current.activePositions, filledPos];
+        }
+        setPreOrders((prev) => prev.filter((o) => o.id !== order.id));
+        setActivePositions((prev) =>
+          prev.some((p) => p.id === order.id) ? prev : [...prev, filledPos]
+        );
         recordTradeOnServer({
           tradeUid: order.id,
           symbol: order.symbol,
@@ -2415,11 +2425,18 @@ export default function App() {
     isSubmittingOrderRef.current = true;
 
     try {
-      if (user.isBlocked) {
+      const {
+        user: currentUser,
+        quotes: currentQuotes,
+        activePositions: currentPositions,
+        preOrders: currentPreOrders,
+      } = stateRef.current;
+
+      if (currentUser.isBlocked) {
         showToast('Your account is currently restricted. Please contact support.', 'error');
         return false;
       }
-      const quote = quotes.find((q) => q.symbol === payload.symbol) ?? quotes[0];
+      const quote = currentQuotes.find((q) => q.symbol === payload.symbol) ?? currentQuotes[0];
       if (!Number.isFinite(payload.margin) || payload.margin <= 0) {
         showToast('Enter a valid margin amount greater than $0.', 'error');
         return false;
@@ -2433,7 +2450,7 @@ export default function App() {
         customEntryPrice: payload.customEntryPrice,
       });
 
-      const avail = accountMode === 'demo' ? user.demoBalance : user.realBalance;
+      const avail = accountMode === 'demo' ? currentUser.demoBalance : currentUser.realBalance;
       if (preview.totalRequired > avail) {
         showToast(`Insufficient ${accountMode.toUpperCase()} balance (Need $${preview.totalRequired.toFixed(2)}).`, 'error');
         return false;
@@ -2443,8 +2460,8 @@ export default function App() {
         payload.symbol,
         payload.side,
         accountMode,
-        activePositions,
-        preOrders
+        currentPositions,
+        currentPreOrders
       );
       if (!conflict.allowed) {
         showToast(conflict.reason || `You already have an active position or pending order on ${payload.symbol}. Close or cancel it first.`, 'error');
@@ -2462,10 +2479,16 @@ export default function App() {
         return false;
       }
 
-      const nextDemo = accountMode === 'demo' ? user.demoBalance - preview.totalRequired : user.demoBalance;
-      const nextReal = accountMode === 'real' ? user.realBalance - preview.totalRequired : user.realBalance;
+      const nextDemo = accountMode === 'demo' ? currentUser.demoBalance - preview.totalRequired : currentUser.demoBalance;
+      const nextReal = accountMode === 'real' ? currentUser.realBalance - preview.totalRequired : currentUser.realBalance;
       const tradedReal = accountMode === 'real';
 
+      stateRef.current.user = {
+        ...currentUser,
+        demoBalance: nextDemo,
+        realBalance: nextReal,
+        hasTradedAfterDeposit: tradedReal ? true : currentUser.hasTradedAfterDeposit,
+      };
       setUser((prev) => ({
         ...prev,
         demoBalance: nextDemo,
@@ -2494,10 +2517,12 @@ export default function App() {
       };
 
       if (preview.isLimitOrder) {
-        setPreOrders((prev) => [...prev, orderData]);
+        stateRef.current.preOrders = [...stateRef.current.preOrders, orderData];
+        setPreOrders((prev) => (prev.some((o) => o.id === orderId) ? prev : [...prev, orderData]));
         showToast(`Limit Pre-Order queued for ${payload.symbol} at $${preview.effectiveEntryPrice.toFixed(2)}.`);
       } else {
-        setActivePositions((prev) => [...prev, orderData]);
+        stateRef.current.activePositions = [...stateRef.current.activePositions, orderData];
+        setActivePositions((prev) => (prev.some((p) => p.id === orderId) ? prev : [...prev, orderData]));
         recordTradeOnServer({
           tradeUid: orderId,
           symbol: payload.symbol,
@@ -2514,11 +2539,11 @@ export default function App() {
         showToast(`Opened ${payload.side.toUpperCase()} ${payload.symbol} (${payload.leverage}x).`);
       }
 
-      if (!user.isLocalDemoSession) {
+      if (!currentUser.isLocalDemoSession) {
         applyWalletDeltaOnServer(accountMode, -preview.totalRequired, tradedReal);
       }
 
-      if (!user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
+      if (!currentUser.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
         try {
           const uid = auth.currentUser.uid;
           await updateDoc(doc(db, 'users', uid), {
@@ -2574,13 +2599,21 @@ export default function App() {
   );
 
   const handleChasePreOrder = async (id: string) => {
-    const order = preOrders.find((o) => o.id === id);
+    if (triggeredPreOrderIdsRef.current.has(id)) return;
+    const order = stateRef.current.preOrders.find((o) => o.id === id);
     if (!order) return;
-    const quote = quotes.find((q) => q.symbol === order.symbol);
-    const livePrice = quote ? quote.price : order.entryPrice;
+    triggeredPreOrderIdsRef.current.add(id);
 
+    const quote = stateRef.current.quotes.find((q) => q.symbol === order.symbol);
+    const livePrice = quote ? quote.price : order.entryPrice;
+    const filledPos: Position = { ...order, entryPrice: livePrice, markPrice: livePrice };
+
+    stateRef.current.preOrders = stateRef.current.preOrders.filter((o) => o.id !== id);
+    if (!stateRef.current.activePositions.some((p) => p.id === id)) {
+      stateRef.current.activePositions = [...stateRef.current.activePositions, filledPos];
+    }
     setPreOrders((prev) => prev.filter((o) => o.id !== id));
-    setActivePositions((prev) => [...prev, { ...order, entryPrice: livePrice, markPrice: livePrice }]);
+    setActivePositions((prev) => (prev.some((p) => p.id === id) ? prev : [...prev, filledPos]));
     recordTradeOnServer({
       tradeUid: order.id,
       symbol: order.symbol,
@@ -2588,12 +2621,17 @@ export default function App() {
       leverage: order.leverage,
       margin: order.margin,
       entryPrice: livePrice,
-      liqPrice: getNumericLiqPrice({ ...order, entryPrice: livePrice }),
+      liqPrice: getNumericLiqPrice(filledPos),
       tradingFee: order.tradingFeePaid,
       pnlVal: 0,
       status: 'OPEN',
       accountMode: order.accountMode,
     });
+    if (!stateRef.current.user.isLocalDemoSession && isFirebaseConfigured && db && auth?.currentUser) {
+      const uid = auth.currentUser.uid;
+      deleteDoc(doc(db, 'users', uid, 'orders', id)).catch(() => {});
+      setDoc(doc(db, 'users', uid, 'positions', id), filledPos).catch(() => {});
+    }
     showToast(`Order chased to market $${livePrice.toFixed(2)} and opened.`);
   };
 
@@ -2605,16 +2643,20 @@ export default function App() {
   };
 
   const handleCancelPreOrder = async (id: string) => {
-    const order = preOrders.find((o) => o.id === id);
+    if (triggeredPreOrderIdsRef.current.has(id)) return;
+    const order = stateRef.current.preOrders.find((o) => o.id === id);
     if (!order) return;
+    triggeredPreOrderIdsRef.current.add(id);
+
     const refund = order.margin + order.tradingFeePaid;
+    stateRef.current.preOrders = stateRef.current.preOrders.filter((o) => o.id !== id);
     setPreOrders((prev) => prev.filter((o) => o.id !== id));
     setUser((prev) => ({
       ...prev,
       demoBalance: order.accountMode === 'demo' ? prev.demoBalance + refund : prev.demoBalance,
       realBalance: order.accountMode === 'real' ? prev.realBalance + refund : prev.realBalance,
     }));
-    if (!user.isLocalDemoSession) {
+    if (!stateRef.current.user.isLocalDemoSession) {
       applyWalletDeltaOnServer(order.accountMode, refund);
       if (isFirebaseConfigured && db && auth?.currentUser) {
         deleteDoc(doc(db, 'users', auth.currentUser.uid, 'orders', id)).catch(() => {});
